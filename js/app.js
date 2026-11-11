@@ -3,7 +3,8 @@ import * as DB from './db.js';
 import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
 
-export const APP_VERSION = '1.5.0';
+export const APP_VERSION = '1.5.1';
+const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
 const PROX = ['1 Conferir', '2 Preparar', '3 Descer', '4 Levar à doca', '5 Embarcar', '6 Embarcado'];
@@ -78,23 +79,28 @@ for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, garan
 // ação feita nela (conferir, etapa, foto, nota, item novo); só olhar não abre janela. Tudo vai em vistorias.json (casar fotos).
 const DOIS_MIN = 120e3;
 const codSala = s => !s ? '' : s.tipo === 'sala' || s.tipo === 'externa' || !s.tipo ? (s.codigo && s.codigo !== '?' ? s.codigo : s.id) : (s.id === '__SL__' ? s.codigo : (s.nome || s.codigo || s.id));
-// modo inspeção (ciclo 8): chave no topo, lembrada no aparelho. Ligado, abrir o painel de uma sala já inicia a janela da sala
-// (tipo "inspecao") e mostra a tela de abertura para o fotógrafo; desligado, vale a regra do ciclo 7 (só ação conta).
-function inspLigada(v) {
-  if (v === undefined) { if (S.insp === undefined) { try { S.insp = localStorage.getItem('appcampo.insp') === '1'; } catch { S.insp = false; } } return S.insp; }
-  S.insp = !!v; try { localStorage.setItem('appcampo.insp', v ? '1' : '0'); } catch { /* sem armazenamento: vale só nesta sessão */ }
+// v1.5.1 (ciclo 9b): não há mais a chave "Inspeção". TODA entrada numa sala (planta, lista, busca, vista do equipamento) abre uma
+// janela nova, com nº novo, e mostra a tela de abertura com QR novo – mesmo que seja a mesma sala de antes. A janela vai da abertura
+// do painel à saída (evento "vistoria" com modo "inspecao"). Voltar de uma ficha ou de um filtro dentro da sala aberta não abre janela.
+// Marcação (buffer, fornos…) e porta do elevador nunca viram sala: a janela, o QR e as fotos vão para a sala oficial da marcação
+// (campo "sala" da marcação no pacote de dados; na falta, a sala sob ela) e a marcação fica no campo "marcacao".
+function oficialDe(s) {
+  if (!s || s.tipo !== 'marca' || !S.seed) return s;
+  const pl = s.planta || s.nivel || S.planta, todas = ((S.seed.plantas[pl] || {}).salas || []);
+  const o = s.sala && (salasDe(pl).find(x => x.id === s.sala && x.tipo !== 'marca') || todas.find(x => x.id === s.sala && x.tipo !== 'marca'));
+  return (o && { ...o, planta: pl }) || salaSob({ ...s, planta: pl }) || s;
 }
+const nomeMarca = s => s.nome || s.codigo || s.id;
 async function proxSeq(chave) { const n = ((await DB.get('meta', chave)) || 0) + 1; await DB.put('meta', n, chave); return n; }
 const idAtual = () => (S.meta.vistoria && S.meta.vistoria.abriu ? S.meta.vistoria.sala : null);
 async function entrouSala(s) {
-  const v = S.meta.vistoria, agora = Date.now(), insp = inspLigada();
-  if (v && v.sala === s.id && !!v.insp === insp) { if (v.fora) { v.fora = null; await DB.put('meta', v, 'vistoria'); } return; }
-  if (v) await encerrarVistoria(agora);
-  S.meta.vistoria = { sala: s.id, rot: codSala(s), abriu: agora, ini: insp ? agora : null, ult: null, n: 0, fora: null };
-  if (insp) Object.assign(S.meta.vistoria, { insp: 1, seq: await proxSeq('inspSeq'), telas: [] });
+  const agora = Date.now(), o = oficialDe(s);
+  if (S.meta.vistoria) await encerrarVistoria(agora);
+  S.meta.vistoria = { sala: o.id, rot: codSala(o), abriu: agora, ini: agora, ult: null, n: 0, fora: null, insp: 1, seq: await proxSeq('inspSeq'), telas: [],
+    ...(o !== s ? { marcacao: nomeMarca(s), marca_id: s.id } : {}) };
   await DB.put('meta', S.meta.vistoria, 'vistoria');
-  if (insp && S.painel && S.painel.id === s.id) telaAbertura(s);  // só aqui: a janela acabou de abrir. Com a janela já aberta, só "Mostrar de novo"
-  S.meta.recentes = [s.id, ...(S.meta.recentes || []).filter(x => x !== s.id)].slice(0, 8); await DB.put('meta', S.meta.recentes, 'recentes');
+  if (S.painel && S.painel.id === s.id && !window.__SEM_QR__) telaAbertura(s);  // a janela acabou de abrir (os testes antigos desligam a exibição automática)
+  S.meta.recentes = [o.id, ...(S.meta.recentes || []).filter(x => x !== o.id)].slice(0, 8); await DB.put('meta', S.meta.recentes, 'recentes');
   renderStatus();
 }
 async function encerrarVistoria(saiu = Date.now()) {
@@ -105,32 +111,36 @@ async function encerrarVistoria(saiu = Date.now()) {
   const t = v.insp ? saiu : (v.ult || saiu);
   await DB.put('eventos', { ts: t, tipo: 'vistoria', id: v.sala, campo: v.ini ? 'fim' : 'visita', valor: new Date(t).toISOString(), sala: v.sala, rot: v.rot,
     ini: v.ini, fim: v.insp ? saiu : v.ult, abriu: v.abriu, saiu, n: v.n, auto: 1, exportado: 0,
-    ...(v.insp ? { modo: 'inspecao', ordem: v.seq, telas: v.telas || [] } : {}) });  // "seq" é a chave do registro de eventos: não usar
+    ...(v.insp ? { modo: 'inspecao', ordem: v.seq, telas: v.telas || [] } : {}),  // "seq" é a chave do registro de eventos: não usar
+    ...(v.marcacao ? { marcacao: v.marcacao, marca_id: v.marca_id } : {}) });
   renderStatus();
 }
 function acaoNaSala(ts) {
   const v = S.meta.vistoria; if (!v || !v.abriu) return;
   v.ini = v.ini || ts; v.ult = ts; v.n = (v.n || 0) + 1; return DB.put('meta', v, 'vistoria');
 }
-// a cada 15 s: atualiza o indicador e encerra a sala atual depois de 2 min na planta sem painel aberto
-async function alternarInspecao() {
-  inspLigada(!inspLigada());
-  await encerrarVistoria();  // a janela aberta fecha com a regra com que foi aberta; a sala em tela reabre com a regra nova
-  renderTopo(); if (S.painel) { await entrouSala(S.painel); renderPainel(); }
-  toast(inspLigada() ? 'Modo inspeção ligado: abrir a sala já inicia a janela e mostra a tela para o fotógrafo' : 'Modo inspeção desligado');
+// janela aberta pela regra antiga (até a v1.5.0, modo inspeção desligado: "só ação conta") que ficou no aparelho: fecha como
+// fechava antes, no horário da última ação – nenhuma janela antiga se perde. Daqui em diante todas nascem pela regra nova.
+async function migrarJanelaAntiga() {
+  const v = S.meta.vistoria; if (!v || !v.abriu || v.insp) return;
+  await encerrarVistoria(v.fora || v.ult || v.abriu);
+  try { localStorage.removeItem('appcampo.insp'); } catch { /* sem armazenamento */ }
 }
 function renderTopo() {
-  const on = inspLigada(), b = $('#btnInsp'); document.body.classList.toggle('insp', on);
-  if (b) { b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.textContent = on ? '🔎 Inspeção: ligada' : 'Inspeção'; b.onclick = () => { if (S.seed) alternarInspecao(); }; }
   const m = $('#btnMenu'); if (m) m.onclick = () => { if (S.seed) abrirMenu(); };
+}
+// "Mostrar QR": a tela de abertura da janela desta sala; se a janela já fechou (2 min na planta, fechar o dia), abre outra
+async function mostrarQR(s) {
+  const v = S.meta.vistoria;
+  if (!v || v.sala !== oficialDe(s).id) await entrouSala(s);
+  if (!$('#abertura')) telaAbertura(s);
 }
 function abrirMenu() {
   const s = S.painel, v = S.meta.vistoria;
   modal(h('div', { class: 'ficha', id: 'menu' }, h('h2', {}, 'Menu'),
     h('div', { class: 'menu-ops' },
       h('button', { id: 'mnCalibrar', onclick: () => { fecharModal(); setTimeout(telaCalibrar, 150); } }, '🕒 Calibrar relógio (fotógrafo)'),
-      h('button', { id: 'mnInsp', onclick: () => { fecharModal(); alternarInspecao(); } }, inspLigada() ? '🔎 Desligar o modo inspeção' : '🔎 Ligar o modo inspeção'),
-      s && v && v.insp && v.sala === s.id ? h('button', { id: 'mnAbertura', onclick: () => { fecharModal(); setTimeout(() => telaAbertura(s), 150); } }, `📺 Tela de abertura de ${codSala(s)}`) : null),
+      s && v && v.sala === oficialDe(s).id ? h('button', { id: 'mnAbertura', onclick: () => { fecharModal(); setTimeout(() => telaAbertura(s), 150); } }, `📺 Mostrar QR de ${codSala(oficialDe(s))}`) : null),
     h('p', { class: 'sub' }, 'Calibrar relógio: o fotógrafo fotografa essa tela no início do dia; a foto dá o desvio do relógio da câmera.'),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Fechar'))));
 }
@@ -150,13 +160,14 @@ function telaCheia(conteudo, aoTique) {
   document.body.append(el); aoTique(el); empilhar('abertura', fim);
 }
 async function telaAbertura(s) {
-  const v = S.meta.vistoria; if (!v || v.sala !== s.id || !v.insp) return;
-  const ts = Date.now(), cod = codSala(s), txt = `${s.id}|${isoLocal(ts)}|${v.seq}`;
+  const v = S.meta.vistoria, o = oficialDe(s); if (!v || v.sala !== o.id || !v.insp) return;
+  const ts = Date.now(), cod = codSala(o), txt = `${o.id}|${isoLocal(ts)}|${v.seq}`;  // o QR leva a sala oficial, nunca a marcação
   v.telas = [...(v.telas || []), ts]; await DB.put('meta', v, 'vistoria');
   telaCheia(h('div', { class: 'ab-box', 'data-qr': txt },
     h('div', { class: 'ab-rot' }, 'SALA'),
     h('div', { class: 'ab-cod', id: 'abCod', style: `font-size:min(${Math.round(130 / Math.max(6, cod.length))}vw,17vh)` }, cod),
-    h('div', { class: 'ab-nome' }, s.nome && s.nome !== cod ? s.nome : ''),
+    h('div', { class: 'ab-nome' }, [Array.isArray(o.codigos) && o.codigos.length > 1 ? codigosDe(o) : '', o.nome && o.nome !== cod ? o.nome : ''].filter(Boolean).join(' · ')),
+    o !== s ? h('div', { class: 'ab-marc', id: 'abMarc' }, `marcação: ${nomeMarca(s)}`) : null,
     h('div', { class: 'ab-data' }, new Date(ts).toLocaleDateString('pt-BR'), h('b', { id: 'abHora' }, horaSeg(ts))),
     h('div', { class: 'ab-qr', id: 'abQr', html: qrSvg(txt) }),
     h('div', { class: 'ab-pe' }, `nº ${v.seq} · fotografe esta tela ao entrar na sala · toque para fechar`)),
@@ -252,7 +263,7 @@ async function carregar() {
   // nome da sala no Schedule (ex.: DOCA) ↔ sala da planta: "Onde está agora" pode guardar um ou outro
   S.alias = {}; S.aliasInv = {};
   for (const i of seed.itens) if (i.local && i.sala && i.sala !== i.local) { S.alias[i.sala] = i.local; S.aliasInv[i.local] = i.sala; }
-  await migrarDivergencias(); await migrarVistoriaManual(); await indexarFotosSala();
+  await migrarDivergencias(); await migrarVistoriaManual(); await migrarJanelaAntiga(); await indexarFotosSala();
   for (const nv of Object.keys(seed.plantas)) {
     const blob = await DB.get('arquivos', 'planta_' + nv);
     if (S.plantaUrls[nv]) URL.revokeObjectURL(S.plantaUrls[nv]);
@@ -273,11 +284,18 @@ async function indexarFotosSala() {
   for (const f of await DB.all('fotos')) {
     if (!String(f.item || '').startsWith('SALA:')) continue;
     if (!f.reg) { Object.assign(f, { sala_id: f.item.slice(5), origem: 'app', com: f.com || '', equip: f.equip || '', ponto: f.ponto || null, reg: 1, migrado: 'Notas / inspeção' }); await DB.put('fotos', f); }
+    // v1.5.1: foto registrada numa marcação (até a v1.5.0) passa para a sala oficial; a marcação fica guardada. O nome do arquivo não muda.
+    const mk = salaPorId(f.sala_id), of = mk && mk.tipo === 'marca' ? oficialDe(mk) : null;
+    if (of && of !== mk) {
+      Object.assign(f, { sala_id: of.id, item: 'SALA:' + of.id, sala: of.codigo && of.codigo !== '?' ? of.codigo : of.id, planta: of.planta || f.planta, marcacao: nomeMarca(mk), marca_id: mk.id });
+      await DB.put('fotos', f);
+    }
     const { blob, ...m } = f; if (!S.fotosSala.has(f.sala_id)) S.fotosSala.set(f.sala_id, []); S.fotosSala.get(f.sala_id).push(m);
   }
   for (const l of S.fotosSala.values()) l.sort((a, b) => a.ts - b.ts);
 }
-const fotosDaSala = s => S.fotosSala.get(s.id) || [];
+// na marcação aparecem as fotos da sala oficial; na sala unificada, também as das salas que entraram nela
+function fotosDaSala(s) { const o = oficialDe(s); return [o.id, ...(o.juntou || [])].flatMap(id => S.fotosSala.get(id) || []).sort((a, b) => a.ts - b.ts); }
 // ciclo 6b: "não está no site / não encontrado" deixou de ser "fora do escopo" e passou a ser divergência
 async function migrarDivergencias() {
   const md = new Set(ESC().motivos_diverg.concat(['Não está no site', 'Não encontrado']));
@@ -326,7 +344,7 @@ function renderStatus() {
             h('span', { class: 'pill' + (p ? ' warn' : ''), id: 'pillPend' }, `${p} alteração(ões) a fechar`),
             h('span', { class: 'pill hide-sm' + (velho && p ? ' bad' : '') }, u ? `Último fechamento ${fmtD(u)}` : 'Nunca fechado'),
             idAtual() ? h('span', { class: 'pill vist', id: 'pillSala', title: 'Sala em que o app considera que você está' },
-              `📷 ${S.meta.vistoria.rot || S.meta.vistoria.sala} · ${Math.max(0, Math.round((Date.now() - S.meta.vistoria.abriu) / 60e3))} min`) : null].filter(Boolean));
+              `📷 ${S.meta.vistoria.rot || S.meta.vistoria.sala}${S.meta.vistoria.marcacao ? ' · ' + S.meta.vistoria.marcacao : ''} · ${Math.max(0, Math.round((Date.now() - S.meta.vistoria.abriu) / 60e3))} min`) : null].filter(Boolean));
   renderTopo();
   const fx = $('#faixaDemo'); if (fx) fx.hidden = !(S.seed && S.seed.demo); document.body.classList.toggle('demo', !!(S.seed && S.seed.demo));
 }
@@ -390,8 +408,10 @@ function nomeOficial(o) { return [o.codigo && o.codigo !== '?' && o.codigo !== o
 function rotuloSala(s) {
   if (!s) return '';
   if (s.tipo === 'marca') { const uso = s.nome || s.codigo; const o = salaSob(s); return o && nomeOficial(o) ? `${uso} · ${nomeOficial(o)}` : uso; }
-  return `${s.codigo && s.codigo !== '?' ? s.codigo : s.id}${s.nome && s.nome !== s.codigo ? ' · ' + s.nome : ''}`;
+  return `${codigosDe(s)}${s.nome && s.nome !== s.codigo ? ' · ' + s.nome : ''}`;
 }
+// sala unificada (ex.: duas salas juntadas numa só): o rótulo leva todos os códigos oficiais – "L1.P.101 + L1.P.102 · NOME"
+function codigosDe(s) { return Array.isArray(s.codigos) && s.codigos.length > 1 ? s.codigos.join(' + ') : (s.codigo && s.codigo !== '?' ? s.codigo : s.id); }
 // todos os itens de uma planta-detalhe (a sala limpa): os da sala de origem dela, os criados nela e os movidos para uma área dela
 function itensDaPlanta(pl) {
   const p = S.seed.plantas[pl] || {}; const ids = new Set(salasDe(pl).map(x => x.id));
@@ -443,7 +463,7 @@ function telaPlanta() {
     const ly = s.label ? s.label[1] : s.poly.reduce((a, p) => a + p[1], 0) / s.poly.length;
     if (its.length || s.tipo !== 'sala') {
       layer.append(h('span', { class: 'dot dot-' + s.tipo, style: `left:${lx}px;top:${ly}px;--c:${cor(pr)}`, 'data-dot': s.id }));
-      const tit = s.tipo === 'sala' ? (s.codigo !== '?' ? s.codigo : s.id) : s.tipo === 'bloco' ? `${s.codigo} ▸` : s.tipo === 'externa' ? s.codigo : s.nome;
+      const tit = s.tipo === 'sala' ? (s.codigo !== '?' ? codigosDe(s) : s.id) : s.tipo === 'bloco' ? `${s.codigo} ▸` : s.tipo === 'externa' ? s.codigo : s.nome;
       layer.append(h('button', { class: `pin pin-${s.tipo}`, style: `left:${lx}px;top:${ly}px;--c:${s.tipo === 'marca' ? (COR_MARCA[s.marca] || '#555') : cor(pr)}`,
         'data-pin': s.tipo === 'sala' && s.codigo !== '?' ? s.codigo : s.id, 'data-sala': s.id, onclick: ev => { ev.stopPropagation(); tocarSala(s); } },
         h('b', {}, tit), its.length ? h('small', {}, `${cf}/${its.length}`) : null));
@@ -910,11 +930,12 @@ function salvarSalaNova() {
 
 // ---------- painel de sala / área ----------
 function abrirSala(s, q) {
-  const novo = !S.painel;
+  const novo = !S.painel, mesma = !!S.painel && S.painel.id === s.id;  // painel já aberto nesta sala: não é uma entrada nova
   if (!S.filtro || S.filtro.sala !== s.id) { S.filtro = { sala: s.id, q: q || '', pref: '' }; S.abertos = {}; }  // o filtro vale enquanto estiver na sala
   else if (q != null) { S.filtro.q = q; S.filtro.pref = ''; }
   S.painel = s; if (novo) empilhar('painel', fecharPainelJa);
-  entrouSala(s).then(() => { if (S.painel === s) renderPainel(); }); renderPainel();
+  if (!mesma) entrouSala(s).then(() => { if (S.painel === s) renderPainel(); });  // cada entrada: janela nova + tela de abertura com QR novo
+  renderPainel();
   if (S.view === 'planta') { const pg = document.querySelector(`polygon[data-sala="${CSS.escape(s.id)}"]`); document.querySelectorAll('polygon.sel').forEach(p => p.classList.remove('sel')); if (pg) pg.classList.add('sel'); }
 }
 function fecharPainelJa() { S.painel = null; $('#painel').classList.remove('on'); if (S.view === 'planta') render(); }
@@ -963,18 +984,19 @@ function renderPainel() {
   p.innerHTML = '';
   const todosSala = itensDaSala(s); const todos = filtraSala(todosSala);
   const its = ativos(todos); const foraL = todos.filter(foraEsc); const divL = todos.filter(it => divEsc(it) && !foraEsc(it));
-  const nota = est('SALA:' + s.id); const f = S.filtro || (S.filtro = { sala: s.id, q: '', pref: '' });
-  const insp = inspLigada(); const lemb = lembretes(s);
+  const of = oficialDe(s); const nota = est('SALA:' + of.id); const f = S.filtro || (S.filtro = { sala: s.id, q: '', pref: '' });
+  const lemb = lembretes(s);
   const prefs = [...new Set(todosSala.map(i => prefixo(i.tag)))].sort();
   const filtrando = !!(f.pref || (f.q || '').trim());
   const head = h('div', { class: 'phead' },
     h('div', {}, h('button', { class: 'voltar', id: 'btnVoltarPainel', onclick: fecharPainel }, '← Voltar'), h('h2', {}, rotuloSala(s) || s.id),
       h('div', { class: 'sub' }, `${{ sala: 'Sala', area: 'Área', marca: 'Subárea / marcação', externa: 'Área externa' }[s.tipo] || ''}${s.area_m2 ? ' · ' + Math.round(s.area_m2) + ' m²' : ''} · ${its.length} itens · ${conferidos(its)} conferidos`,
+        of !== s ? h('div', { class: 'nota marca-of', id: 'avisoMarca' }, `Marcação: a janela, o QR e as fotos vão para a sala ${rotuloSala(of)}`) : null,
         s.duvida ? h('div', { class: 'nota duvida', id: 'avisoDuvida' }, '⚠ ' + s.duvida) : null,
         s.nota ? h('div', { class: 'nota' }, '📌 ' + s.nota) : null, nota.com ? h('div', { class: 'nota' }, '📝 ' + nota.com) : null,
         lemb.length ? h('div', { class: 'nota lembrete', id: 'lembreteSala' }, `⚡ Nesta sala: ${lemb.map(l => l.rot).join(' · ')} – fotografar`) : null)),
     h('div', { class: 'pact' },
-      insp ? h('button', { id: 'btnAbertura', title: 'Mostrar de novo a tela de abertura para o fotógrafo', onclick: async () => { await entrouSala(s); telaAbertura(s); } }, '📺 Mostrar de novo') : null,
+      h('button', { id: 'btnAbertura', class: 'primary qr-btn', title: 'Mostrar de novo a tela de abertura (QR) desta entrada na sala, para o fotógrafo', onclick: () => mostrarQR(s) }, '📺 Mostrar QR'),
       h('button', { id: 'btnDetalhes', class: S.det ? 'on' : '', 'aria-pressed': String(!!S.det), title: 'Mostrar peso e dimensões de todos os itens', onclick: () => { S.det = !S.det; S.detIt.clear(); renderPainel(); } }, S.det ? 'Detalhes: ligados' : 'Detalhes'),
       h('button', { id: 'btnNotasSala', onclick: () => notasSala(s) }, '📝 Notas / inspeção'),
       h('button', { id: 'btnNovoItem', onclick: () => novoItem(s) }, '+ Item não previsto'),
@@ -987,12 +1009,11 @@ function renderPainel() {
       onclick: () => { f.pref = f.pref === pf ? '' : pf; renderPainel(); } }, pf))) : null,
     filtrando ? h('div', { class: 'sub', id: 'nFiltro' }, `${todos.length} de ${todosSala.length} itens `, h('button', { class: 'mini', id: 'btnLimparFiltro', onclick: () => { f.q = ''; f.pref = ''; renderPainel(); } }, '✕ limpar filtro')) : null) : null;
   const body = h('div', { class: 'pbody' });
-  if (insp) body.append(secFotos(s));  // modo inspeção: as fotos da sala vêm antes da lista de equipamentos
+  body.append(secFotos(s));  // as fotos da sala vêm antes da lista de equipamentos
   const grupos = grupoPorEquip(its);
   for (const [tag, lst] of grupos) body.append(blocoEquip(tag, lst, grupos.length <= 3, s));
   if (!its.length && filtrando) body.append(h('p', { class: 'vazio' }, 'Nenhum item desta sala passa no filtro.'));
   else if (!its.length) body.append(h('p', { class: 'vazio' }, foraL.length || divL.length ? 'Todos os itens daqui estão fora do escopo ou em divergência.' : 'Nenhum item previsto aqui. Use "+ Item não previsto" para registrar o que encontrar, "Fotos da sala" para fotografar e "Notas / inspeção" para observações.'));
-  if (!insp) body.append(secFotos(s));  // fora do modo inspeção, as fotos da sala ficam depois dos equipamentos (só aqui; "Notas" tem só o texto)
   if (foraL.length) { // à parte, recolhido: não conta na planta, mas dá para rever e desfazer
     const det = h('details', { class: 'eq fora-grupo', id: 'grupoFora' }, h('summary', {}, h('b', {}, `⊘ ${ESC().rotulo_fora} (${foraL.length})`),
       h('span', { class: 'nm' }, ' não contam na planta nem nas pendências')));
@@ -1038,7 +1059,7 @@ function loteDiverg(tag, lst) {
     h('p', { class: 'sub' }, `Registra divergência para os ${alvo.length} itens de ${tag}. Exige comentário e pelo menos uma foto (do local onde deveria estar). Conta à parte no Resumo e no dashboard.`),
     h('div', { class: 'grid' },
       h('label', {}, 'Motivo', h('select', { name: 'motivo', id: 'loteDivMotivo' }, h('option', { value: '' }, '—'), ESC().motivos_diverg.map(m => h('option', { value: m }, m)))),
-      h('label', { class: 'full' }, 'Comentário (obrigatório)', h('textarea', { name: 'obs', id: 'loteDivObs', rows: 2, placeholder: 'onde procurou, quem confirmou…' }))),
+      h('label', { class: 'full' }, 'Comentário (obrigatório)', h('textarea', { name: 'obs', id: 'loteDivObs', rows: 2, placeholder: `onde procurou, quem confirmou… (${DITAR})` }))),
     h('div', { class: 'fotos' }, h('b', {}, 'Foto (obrigatória)'), box,
       h('label', { class: 'btn' }, '📷 Tirar / escolher foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, name: 'foto', id: 'loteDivFoto',
         onchange: async ev => { for (const f of ev.target.files) { const fo = await addFoto(f, alvo[0]); fotos.push(fo); box.append(thumb(fo)); } ev.target.value = ''; } }))),
@@ -1063,7 +1084,7 @@ function loteFora(tag, lst) {
   modal(form);
 }
 async function notasSala(s) {
-  const id = 'SALA:' + s.id; const e = est(id);
+  const id = 'SALA:' + oficialDe(s).id; const e = est(id);  // notas escritas a partir de uma marcação ficam na sala oficial
   const form = h('form', { class: 'ficha', onsubmit: async ev => {
     ev.preventDefault(); const fd = new FormData(form);
     await setEstado(id, { com: fd.get('com') || '', estado: fd.get('estado') || '' }, 'notas sala', fd.get('com') || '');
@@ -1073,13 +1094,19 @@ async function notasSala(s) {
     h('p', { class: 'sub' }, 'Observações gerais da sala (piso, paredes, forro, portas, iluminação, infiltração, elétrica). As fotos ficam em "Fotos da sala", no painel.'),
     h('div', { class: 'grid' },
       h('label', {}, 'Condição geral', h('select', { name: 'estado' }, h('option', { value: '' }, '—'), ['Boa', 'Regular', 'Ruim', 'Interditada'].map(o => h('option', { value: o, selected: o === e.estado }, o)))),
-      h('label', { class: 'full' }, 'Observações', h('textarea', { name: 'com', rows: 4 }, e.com || ''))),
+      h('label', { class: 'full' }, 'Observações', h('textarea', { name: 'com', rows: 4, placeholder: DITAR }, e.com || ''))),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary' }, 'Salvar')));
   modal(form);
 }
 
 // ---------- fotos da sala (ciclo 8): registro com comentário, equipamento e ponto na planta ----------
-const lembretes = s => { const L = (S.seed && S.seed.lembretes) || {}; return [...(L[s.id] || []), ...(s.codigo && s.codigo !== s.id ? (L[s.codigo] || []) : [])]; };
+// lembretes da sala (da sala oficial, se for marcação); o mesmo quadro com dois nomes (tag "A/B" e outra linha só "B") aparece uma vez
+function lembretes(s0) {
+  const s = oficialDe(s0), L = (S.seed && S.seed.lembretes) || {}, l = [...(L[s.id] || []), ...(s.codigo && s.codigo !== s.id ? (L[s.codigo] || []) : [])];
+  const nomes = x => String(x.tag || x.rot || '').split('/').map(t => t.toUpperCase().replace(/[^A-Z0-9]+/g, '')).filter(Boolean), vistos = new Set(), fica = new Set();
+  for (const x of [...l].sort((a, b) => nomes(b).length - nomes(a).length)) { const n = nomes(x); if (n.length && n.every(t => vistos.has(t))) continue; n.forEach(t => vistos.add(t)); fica.add(x); }
+  return l.filter(x => fica.has(x));
+}
 function urlFoto(id) {  // miniatura: a imagem é lida do aparelho uma vez e reaproveitada
   if (!S.thumbUrl.has(id)) S.thumbUrl.set(id, DB.get('fotos', id).then(f => (f && f.blob ? URL.createObjectURL(f.blob) : '')));
   return S.thumbUrl.get(id);
@@ -1088,14 +1115,14 @@ function thumbReg(m, s) {
   const img = h('img', { alt: m.nome }); urlFoto(m.id).then(u => { if (u) img.src = u; });
   const marcas = [m.com ? '💬' : '', m.equip ? '🔧' : '', m.ponto ? '📍' : ''].join('');
   return h('figure', { class: 'reg', 'data-foto': m.id, title: 'Tocar para comentar, ligar a um equipamento ou marcar o ponto', onclick: () => editarFoto(m.id, s) },
-    img, h('figcaption', {}, `${m.id} ${marcas}`), m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null);
+    img, h('figcaption', {}, `${m.id} ${marcas}`), m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null);
 }
 // seção "Fotos da sala": câmera contínua (foto → foto → foto, sem sair da tela) e, como alternativa, a câmera/galeria do aparelho
 function secFotos(s) {
-  const l = fotosDaSala(s);
+  const l = fotosDaSala(s), of = oficialDe(s);
   const aoEscolher = async ev => { const fs = [...ev.target.files]; ev.target.value = ''; for (const f of fs) await addFotoSala(f, s); renderPainel(); };
   return h('section', { class: 'fotos-sala', id: 'fotosSala' },
-    h('div', { class: 'fs-head' }, h('b', { id: 'nFotosSala' }, `📷 Fotos da sala (${l.length})`),
+    h('div', { class: 'fs-head' }, h('b', { id: 'nFotosSala' }, `📷 Fotos da sala${of !== s ? ' ' + codSala(of) : ''} (${l.length})`),
       h('button', { type: 'button', class: 'primary', id: 'btnFotografar', onclick: () => abrirCamera(s) }, '📷 Fotografar'),
       h('label', { class: 'btn mini' }, '🖼 Do aparelho', h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, name: 'foto', id: 'inFotoSala', onchange: aoEscolher })),
       h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, id: 'inFotoCap', onchange: aoEscolher })),
@@ -1104,8 +1131,9 @@ function secFotos(s) {
     l.length ? h('p', { class: 'sub' }, 'Toque numa foto para comentar, ligar a um equipamento ou marcar o ponto na planta.') : null);
 }
 async function addFotoSala(file, s) {
-  return addFoto(file, { id: 'SALA:' + s.id, tag: 'SALA' }, s.codigo && s.codigo !== '?' ? s.codigo : s.id,
-    { sala_id: s.id, planta: s.planta || S.planta, origem: 'app', com: '', equip: '', ponto: null, reg: 1 });
+  const o = oficialDe(s);  // foto tirada numa marcação: fica na sala oficial, com a marcação guardada
+  return addFoto(file, { id: 'SALA:' + o.id, tag: 'SALA' }, o.codigo && o.codigo !== '?' ? o.codigo : o.id,
+    { sala_id: o.id, planta: o.planta || s.planta || S.planta, origem: 'app', com: '', equip: '', ponto: null, reg: 1, ...(o !== s ? { marcacao: nomeMarca(s), marca_id: s.id } : {}) });
 }
 // câmera dentro do app: cada toque no disparador grava uma foto e a câmera continua aberta
 async function abrirCamera(s) {
@@ -1181,7 +1209,7 @@ async function editarFoto(id, s) {
   } },
     h('h2', {}, `${id} · ${rotuloSala(s) || f.sala}`), h('p', { class: 'sub' }, `${fmtD(f.ts)} · origem: ${f.origem || 'app'} · ${f.nome}`), img,
     h('div', { class: 'grid' },
-      h('label', { class: 'full' }, 'Comentário (só se a foto não deixar claro)', h('textarea', { name: 'com', id: 'fotoCom', rows: 2 }, f.com || '')),
+      h('label', { class: 'full' }, 'Comentário (só se a foto não deixar claro)', h('textarea', { name: 'com', id: 'fotoCom', rows: 2, placeholder: DITAR }, f.com || '')),
       h('div', { class: 'fl full' }, 'Equipamento (opcional)',
         h('input', { type: 'search', id: 'fotoEqBusca', placeholder: 'Buscar tag ou nome…', autocomplete: 'off', oninput: ev => montaEq(ev.target.value) }), selEq),
       h('div', { class: 'fl full' }, 'Ponto na planta (opcional): toque na miniatura da sala', mini,
@@ -1191,16 +1219,34 @@ async function editarFoto(id, s) {
   modal(form);
 }
 
+// v1.5.1: dois ou mais itens do MESMO equipamento com o MESMO nome de volume – mostra em destaque o que os diferencia:
+// o nº do volume ("vol. 2/20"), se cada um tiver o seu; senão o nº da caixa; senão a posição entre os iguais ("2 de 5 iguais", na ordem da lista)
+function diferenca(it) {
+  if (!S._ig || S._ig.n !== S.itens.length) {
+    const g = new Map(); for (const i of S.itens) { const k = i.tag + '\u0001' + (i.vol || ''); if (!g.has(k)) g.set(k, []); g.get(k).push(i); }
+    const m = new Map(), dist = (l, c) => l.every(x => x[c] != null && x[c] !== '') && new Set(l.map(x => String(x[c]))).size === l.length;
+    for (const l of g.values()) {
+      if (l.length < 2) continue;
+      const modo = dist(l, 'nvol') ? 'nvol' : dist(l, 'crate') ? 'crate' : 'ordem';
+      l.forEach((x, k) => m.set(x.id, modo === 'nvol' ? `vol. ${x.nvol}` : modo === 'crate' ? `caixa ${x.crate}` : `${k + 1} de ${l.length} iguais`));
+    }
+    S._ig = { n: S.itens.length, m };
+  }
+  return S._ig.m.get(it.id) || '';
+}
 function blocoEquip(tag, lst, abrir = false, sala = null) {
   const pr = progresso(lst); const nAt = ativos(lst).length;
   const det = h('details', { class: 'eq', open: S.abertos[tag] ?? (abrir || lst.length <= 12), 'data-tag': tag, ontoggle: () => { S.abertos[tag] = det.open; } });
   const eqInfo = (S.seed.equips.find(e => e.tag === tag) || {});
   const stop = fn => async ev => { ev.preventDefault(); ev.stopPropagation(); await fn(); };
+  // v1.5.1: um cartão por equipamento (fundo alternado, no CSS); o cabeçalho com o tag fica preso no alto enquanto se rola os volumes
+  // dele; os botões de lote saem do cabeçalho, para ele ficar numa linha só
   det.append(h('summary', {},
     h('span', { class: 'bar', style: `--p:${Math.round(pr * 100)}%;--c:${cor(pr)}` }),
     h('b', {}, tag), h('span', { class: 'nm' }, ` ${lst[0].equip || ''} · ${lst[0].lote}`),
     h('span', { class: 'cnt' }, nAt ? `${conferidos(lst)}/${nAt} conf.` : lst.some(divEsc) ? 'divergência' : 'fora do escopo'),
-    eqInfo.dia_caminhao ? h('span', { class: 'cam' }, `🚚 ${eqInfo.dia_caminhao.split('-').reverse().join('/')}`) : null,
+    eqInfo.dia_caminhao ? h('span', { class: 'cam' }, `🚚 ${eqInfo.dia_caminhao.split('-').reverse().join('/')}`) : null));
+  det.append(h('div', { class: 'eq-acoes' },
     nAt ? h('button', { class: 'mini', onclick: stop(() => conferirTodos(lst)) }, '✓ Conferir todos') : null,
     nAt ? h('button', { class: 'mini div-btn', title: ESC().rotulo_diverg, onclick: stop(() => loteDiverg(tag, lst)) }, '⚠ Não encontrado') : null,
     nAt ? h('button', { class: 'mini fora-btn', title: ESC().rotulo_fora, onclick: stop(() => loteFora(tag, lst)) }, '⊘ Fora do escopo')
@@ -1218,21 +1264,21 @@ function blocoEquip(tag, lst, abrir = false, sala = null) {
 function linhaItem(it, consulta = false) {
   const e = est(it.id); const nx = proxima(it);
   const row = h('div', { class: 'it' + (nx === 5 ? ' done' : '') + (e.fora ? ' fora' : '') + (e.diverg ? ' diverg' : '') + (consulta ? ' consulta' : ''), 'data-id': it.id });
-  // peso e dimensões ficam ocultos; aparecem em "Detalhes" (no item, ou no botão do painel, que vale para a sala toda)
-  const temDet = !!(it.peso || it.dim); const det = temDet && (S.det || S.detIt.has(it.id));
+  // CF-ID, peso e dimensões ficam ocultos; aparecem em "Detalhes" (no item, ou no botão do painel, que vale para a sala toda)
+  const det = S.det || S.detIt.has(it.id);
   const troca = () => { if (S.eqSel) renderVista(); else row.replaceWith(linhaItem(it, consulta)); };
   const info = h('div', { class: 'info', onclick: () => ficha(it) },
-    h('div', {}, h('b', {}, it.id), ' ', h('span', { class: 'vol' }, it.vol || '—'),
+    h('div', { class: 'l1' }, h('span', { class: 'vol' }, it.vol || '—'), diferenca(it) ? h('span', { class: 'dif', 'data-dif': it.id }, diferenca(it)) : null,
       it.crate ? h('span', { class: 'meta' }, ` · crate ${it.crate}`) : null, it.nvol ? h('span', { class: 'meta' }, ` · vol ${it.nvol}`) : null,
-      temDet && !S.det ? h('button', { class: 'lnk', 'data-det': it.id, 'aria-expanded': String(det), onclick: ev => { ev.stopPropagation(); S.detIt.has(it.id) ? S.detIt.delete(it.id) : S.detIt.add(it.id); troca(); } }, det ? 'ocultar ▴' : 'Detalhes ▾') : null),
+      !S.det ? h('button', { class: 'lnk', 'data-det': it.id, 'aria-expanded': String(det), onclick: ev => { ev.stopPropagation(); S.detIt.has(it.id) ? S.detIt.delete(it.id) : S.detIt.add(it.id); troca(); } }, det ? 'ocultar ▴' : 'Detalhes ▾') : null),
     e.fora ? h('div', { class: 'tag-fora' }, `⊘ Fora do escopo: ${e.fora}${e.fora_obs ? ' – ' + e.fora_obs : ''}`) : null,
     e.diverg ? h('div', { class: 'tag-div' }, `⚠ Divergência: ${e.diverg}${e.diverg_obs ? ' – ' + e.diverg_obs : ''}`) : null,
-    det ? h('div', { class: 'meta det' }, [it.peso ? `${it.peso} kg` : null, it.dim].filter(Boolean).join(' · ')) : null,
-    h('div', { class: 'meta' }, [e.onde ? `📍 ${rotuloSala(salaPorId(e.onde)) || e.onde}` : (prevista(it) ? '📍 posição prevista (2016)' : null),
+    det ? h('div', { class: 'meta det' }, [it.id, it.peso ? `${it.peso} kg` : null, it.dim].filter(Boolean).join(' · ')) : null,  // o CF-ID (chave interna) fica aqui
+    h('div', { class: 'meta' }, [e.onde ? `📍 ${rotuloSala(salaPorId(e.onde)) || e.onde}` : (prevista(it) ? '📍 posição prevista (2016)' : it.pos_informada ? `📍 ${it.pos_fonte}` : null),
       e.enc ? `Encontrado: ${e.enc}` : null, e.estado || null, e.fotos.length ? `📷 ${e.fotos.length}` : null].filter(Boolean).join(' · ') || ' '));
   if (e.fora || e.diverg) { // fora do escopo / divergência: sem etapas, só o desfazer
     row.append(info, h('div', { class: 'etapas' }, h('button', { class: 'mini volta', onclick: async () => {
-      if (e.fora) await marcarFora([it], ''); if (e.diverg) await marcarDiverg([it], ''); refrescar(); toast(`${it.id} de volta ao escopo`); } },
+      if (e.fora) await marcarFora([it], ''); if (e.diverg) await marcarDiverg([it], ''); refrescar(); toast(`${it.tag} · ${it.vol || 'item'} de volta ao escopo`); } },
       e.diverg && !e.fora ? '↺ Foi encontrado' : '↺ Voltar ao escopo')));
     return row;
   }
@@ -1306,9 +1352,12 @@ async function ficha(it) {
     if (dmot !== (e.diverg || '') || dobs !== (e.diverg_obs || '')) await marcarDiverg([it], dmot, dobs);
     fecharModal(); toast(dmot && !e.diverg ? 'Divergência registrada' : motivo && !e.fora ? 'Item marcado fora do escopo' : (!motivo && e.fora) || (!dmot && e.diverg) ? 'Item de volta ao escopo' : 'Salvo');
   } },
-    h('h2', {}, `${it.id} · ${it.tag}`),
-    h('p', { class: 'sub' }, `${it.equip || ''} · ${it.vol || ''}${it.crate ? ' · crate ' + it.crate : ''} · origem ${it.sala}${it.peso ? ' · ' + it.peso + ' kg' : ''}${it.dim ? ' · ' + it.dim : ''}`),
-    it.pos_fonte ? (prevista(it)
+    h('h2', {}, `${it.tag}${it.equip ? ' · ' + it.equip : ''}`),
+    h('p', { class: 'vol-ficha', id: 'fichaVol' }, it.vol || '—', diferenca(it) ? h('span', { class: 'dif' }, diferenca(it)) : null),
+    h('p', { class: 'sub', id: 'fichaSub' }, `${it.crate ? 'crate ' + it.crate + ' · ' : ''}origem ${it.sala}${it.peso ? ' · ' + it.peso + ' kg' : ''}${it.dim ? ' · ' + it.dim : ''} · ${it.id}`),
+    it.pos_fonte ? (it.pos_informada
+      ? h('p', { class: 'aviso-pos', id: 'avisoPos' }, `📍 ${it.pos_fonte}. Este item ainda não foi conferido: confirme na vistoria (marque "Encontrado") ou informe onde está.`)
+      : prevista(it)
       ? h('p', { class: 'aviso-pos', id: 'avisoPos' }, '⚠ Posição prevista (layout 2016): nenhuma marcação de campo confirma onde este item está. Se achar em outro lugar, informe em "Onde está agora"; se não estiver no site, marque abaixo.')
       : h('p', { class: 'sub', id: 'avisoPos' }, `📍 Posição na planta: ${it.pos_fonte}`)) : null,
     h('div', { class: 'grid' },
@@ -1318,7 +1367,7 @@ async function ficha(it) {
         sug ? h('div', { class: 'aviso-onde', id: 'avisoOnde' }, h('b', {}, `Você está em ${rotuloSala(atual)} – confirmar?`), ' Ao salvar, o item fica registrado nesta sala. ',
           h('button', { type: 'button', class: 'mini', id: 'btnOndeOrigem', onclick: ev => { selOnde.value = ''; ev.target.closest('.aviso-onde').remove(); } }, 'Não: está na sala de origem')) : null,
         h('input', { type: 'search', id: 'buscaOnde', placeholder: 'Buscar sala (código ou nome)…', autocomplete: 'off', oninput: ev => montaOnde(ev.target.value) }), selOnde),
-      h('label', { class: 'full', id: 'campoCom' }, 'Comentário', h('textarea', { name: 'com', id: 'fichaCom', rows: 3, placeholder: e.diverg ? 'onde procurou, quem confirmou…' : '' }, e.com || e.diverg_obs || ''))),
+      h('label', { class: 'full', id: 'campoCom' }, 'Comentário', h('textarea', { name: 'com', id: 'fichaCom', rows: 3, placeholder: e.diverg ? `onde procurou, quem confirmou… (${DITAR})` : DITAR }, e.com || e.diverg_obs || ''))),
     h('fieldset', { class: 'escopo' + (e.fora ? ' on' : ''), id: 'escopo' },
       h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'foraOn', id: 'foraOn', checked: !!e.fora,
         onchange: ev => ev.target.closest('fieldset').classList.toggle('on', ev.target.checked) }), h('b', {}, '⊘ ' + ESC().rotulo_fora)),
@@ -1390,7 +1439,7 @@ function novoItem(sl) {
       h('label', {}, 'Equipamento (se souber)', h('select', { name: 'tag' }, h('option', { value: '' }, '— não sei —'), S.seed.equips.map(e => h('option', { value: e.tag }, `${e.tag} · ${e.nome}`)))),
       h('label', {}, 'Descrição do volume', h('input', { name: 'vol', placeholder: 'ex.: caixa de madeira sem identificação' })),
       h('label', {}, 'Dimensões / peso aprox.', h('input', { name: 'dim' })),
-      h('label', { class: 'full' }, 'Comentário', h('textarea', { name: 'com', rows: 2 })),
+      h('label', { class: 'full' }, 'Comentário', h('textarea', { name: 'com', rows: 2, placeholder: DITAR })),
       h('label', { class: 'btn full' }, '📷 Foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true }))),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary' }, 'Criar item')));
   modal(form);
@@ -1771,6 +1820,6 @@ function pedirConferente(motivo) {
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
 window.__APP__ = { S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
-  inspLigada, alternarInspecao, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
+  oficialDe, mostrarQR, entrouSala, diferenca, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();
