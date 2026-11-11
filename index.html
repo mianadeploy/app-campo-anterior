@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!-- App de Campo · © 2026 Miana Consulting. O código não contém dados de projeto: eles entram por um pacote de dados no aparelho. -->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1F3864">
+<title>App de Campo (versão anterior)</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/app.css">
+<style id="cssAnterior">#faixaAnterior{background:#e65100;color:#fff;font-weight:700;text-align:center;font-size:13px;height:28px;line-height:28px;white-space:nowrap;overflow:hidden;position:sticky;top:0;z-index:55;flex:0 0 auto}#painel,#vista{top:28px!important}body.demo #painel,body.demo #vista{top:56px!important}</style>
+</head>
+<body>
+<div id="faixaAnterior" role="alert">VERSÃO ANTERIOR – usar só se a atual falhar · v1.5.0</div>
+<div id="faixaDemo" role="alert" hidden>DEMONSTRAÇÃO – o que for registrado aqui não entra no controle</div>
+<header>
+  <div class="brand"><b id="brandProj">App de Campo</b><span>Miana Consulting</span></div>
+  <nav>
+    <button data-v="L0">L0 Térreo</button>
+    <button data-v="L1">L1</button>
+    <button data-v="L2">L2</button>
+    <button data-v="lista">Lista</button>
+    <button data-v="equip"><span class="hide-sm">Equipamentos</span><span class="so-sm">Equip.</span></button>
+    <button data-v="resumo">Resumo</button>
+  </nav>
+  <div id="topo">
+    <button id="btnInsp" class="chave" aria-pressed="false" title="Modo inspeção predial: abrir a sala inicia a janela e mostra a tela para o fotógrafo">Inspeção</button>
+    <button id="btnMenu" aria-label="Menu" title="Menu">⋮</button>
+  </div>
+  <div id="status"></div>
+</header>
+<main id="main"></main>
+<aside id="painel" aria-label="Painel da sala"></aside>
+<section id="vista" aria-label="Equipamento"></section>
+<div id="modal"></div>
+<div id="toast" role="status"></div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
