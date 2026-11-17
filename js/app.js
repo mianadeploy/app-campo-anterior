@@ -2,8 +2,9 @@
 import * as DB from './db.js';
 import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
+import { KB_COLS, KB_CSS, kbModelo, kbHtml, kbPos } from './kanban.js';
 
-export const APP_VERSION = '1.6.1';
+export const APP_VERSION = '1.6.2';
 const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
@@ -15,7 +16,10 @@ const ESC = () => ({ ...ESCOPO_PADRAO, ...((S.seed && S.seed.escopo) || {}) });
 // v1.6.0 (ciclo 10) – "Preparação do site": a lista vem do pacote de dados (seed.preparacao, montada a partir do config do escritório);
 // pacote de dados sem ela (anterior ao ciclo 10): vale esta lista mínima.
 const PREP_PADRAO = [{ id: 'container', nome: 'Container' }, { id: 'elevador', nome: 'Elevador consertado' }, { id: 'gerador', nome: 'Gerador' }];
-const prepItens = () => (S.seed && Array.isArray(S.seed.preparacao) && S.seed.preparacao.length ? S.seed.preparacao : PREP_PADRAO);
+const prepBase = () => (S.seed && Array.isArray(S.seed.preparacao) && S.seed.preparacao.length ? S.seed.preparacao : PREP_PADRAO);
+// v1.6.2: mais os itens acrescentados no aparelho ("+ Adicionar item", no Resumo) – vão no pacote do dia e aparecem no painel
+const prepItens = () => { const b = prepBase(), ids = new Set(b.map(x => x.id));
+  return [...b, ...Object.values(S.meta.prep || {}).filter(p => p && p.novo && !p.removido && !ids.has(p.id)).sort((a, c) => (a.criado || 0) - (c.criado || 0)).map(p => ({ id: p.id, nome: p.nome, novo: 1 }))]; };
 const S = { seed: null, itens: [], byId: new Map(), estado: new Map(), meta: {}, planta: 'L0', view: 'planta',
             zoom: { s: 1, x: 0, y: 0 }, painel: null, plantaUrls: {}, salasEd: [], edit: false, draw: null,
             filtro: null, abertos: {}, det: false, detIt: new Set(), eqSel: null, fq: {}, alias: {}, aliasInv: {}, fotosSala: new Map(), thumbUrl: new Map(), ultPac: null };
@@ -36,7 +40,13 @@ const slug = s => String(s || '').replace(/[^A-Za-z0-9]+/g, '');
 export const nomeArq = s => String(s || '').replace(/[\\/:*?"<>|\x00-\x1f]+/g, '-').replace(/-{2,}/g, '-').replace(/^[-. ]+|[-. ]+$/g, '') || 'sem-nome';
 // foto de sala de pacotes antigos (…_SALA:<id>_SALA_FT-0001.jpg) → AAAAMMDD_<SALA>_SALA_FT-NNNN.jpg; qualquer nome sai limpo
 export const nomeFoto = n => nomeArq(String(n || '').replace(/_SALA:[^_]*_SALA_/, '_SALA_'));
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('on'), 2200); }
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.remove('acao'); t.classList.add('on'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('on'), 2200); }
+// aviso com um botão (ex.: "Foto apagada – desfazer"), por alguns segundos
+function toastAcao(msg, rotulo, fn, ms = 6000) {
+  const t = $('#toast'); t.innerHTML = ''; t.classList.add('on', 'acao'); clearTimeout(toast._t);
+  t.append(h('span', {}, msg), h('button', { type: 'button', id: 'btnToastAcao', onclick: async () => { t.classList.remove('on', 'acao'); clearTimeout(toast._t); await fn(); } }, rotulo));
+  toast._t = setTimeout(() => t.classList.remove('on', 'acao'), ms);
+}
 
 // ---------- navegação (ciclo 7): o "voltar" do Android fecha a camada de cima ----------
 // Cada camada aberta (painel da sala, sala limpa, ficha, Lista/Resumo/Equipamentos, vista do equipamento) vale um passo no
@@ -313,7 +323,7 @@ async function setPrep(b, patch, campo, valor) {
 
 // ---------- carga ----------
 async function carregar() {
-  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {};
+  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {}; S._horas = null;   // o kanban relê as horas das etapas depois de carregar ou restaurar
   const seed = await DB.get('meta', 'seed');
   if (!seed) return false;
   // pacote de dados antigo (v1.1) sem a ligação sala limpa → L2: a sala limpa passa a abrir pelo L2
@@ -360,7 +370,7 @@ async function indexarFotosSala() {
   for (const l of S.fotosSala.values()) l.sort((a, b) => a.ts - b.ts);
 }
 // na marcação aparecem as fotos da sala oficial; na sala unificada, também as das salas que entraram nela
-function fotosDaSala(s) { const o = oficialDe(s); return [o.id, ...(o.juntou || [])].flatMap(id => S.fotosSala.get(id) || []).sort((a, b) => a.ts - b.ts); }
+function fotosDaSala(s) { const o = oficialDe(s); return [o.id, ...(o.juntou || [])].flatMap(id => S.fotosSala.get(id) || []).filter(m => !m.desc).sort((a, b) => a.ts - b.ts); }
 // ciclo 6b: "não está no site / não encontrado" deixou de ser "fora do escopo" e passou a ser divergência
 async function migrarDivergencias() {
   const md = new Set(ESC().motivos_diverg.concat(['Não está no site', 'Não encontrado']));
@@ -1136,20 +1146,30 @@ function loteDiverg(tag, lst) {
   modal(form);
 }
 function loteFora(tag, lst) {
-  const alvo = ativos(lst);
+  const aqui = ativos(lst), ids = new Set(aqui.map(i => i.id));
+  // v1.6.2: os outros volumes do mesmo equipamento (em outra sala, ou sem sala na planta). Antes, "todos" marcava só os listados na
+  // tela – e os outros continuavam no escopo, sem aviso (no Quadro, o equipamento ficava meio cinza, meio "a conferir").
+  // Ciclo 11b: a opção "Equipamento inteiro" continua, mostrando onde estão os outros volumes, mas vem DESMARCADA – marcar fora do escopo
+  // por engano tira o volume dos totais e das pendências. O aviso final diz quantos continuam no escopo.
+  const outros = ativos(itensDoEquip(tag)).filter(i => !ids.has(i.id));
   const form = h('form', { class: 'ficha', onsubmit: async ev => {
     ev.preventDefault(); const fd = new FormData(form);
     if (!fd.get('motivo')) { toast('Escolha o motivo'); return; }
+    const alvo = fd.get('inteiro') ? [...aqui, ...outros] : aqui;
     await marcarFora(alvo, fd.get('motivo'), fd.get('obs') || '');
     await log('lote', tag, 'Fora do escopo (todos)', `${alvo.length} · ${fd.get('motivo')}`);
-    fecharModal(); toast(`${alvo.length} itens de ${tag} fora do escopo`);
+    const ficam = ativos(itensDoEquip(tag)).length;
+    fecharModal(); toast(`${alvo.length} volume${alvo.length === 1 ? '' : 's'} de ${tag} fora do escopo${ficam ? ` · ${ficam} continua${ficam === 1 ? '' : 'm'} no escopo` : ' (equipamento inteiro)'}`);
   } },
     h('h2', {}, `${tag} – ${ESC().rotulo_fora}`),
-    h('p', { class: 'sub' }, `Só para motivo documentado. Marca os ${alvo.length} itens de ${tag} ${lst[0].equip ? '(' + lst[0].equip + ') ' : ''}listados aqui. Eles saem da planta e das pendências, mas ficam na Lista (filtro "Fora do escopo"), no histórico e no pacote do dia. Dá para desfazer. Item que não foi encontrado é divergência, não fora do escopo.`),
+    outros.length ? h('label', { class: 'chk inteiro', id: 'foraInteiro' }, h('input', { type: 'checkbox', name: 'inteiro', id: 'chkForaInteiro' }),
+      h('b', {}, `Equipamento inteiro: marcar também os ${outros.length} volume${outros.length === 1 ? '' : 's'} que não estão nesta lista`),
+      h('span', { class: 'sub' }, ` (${resumoLocais(outros).map(g => `${g.n} em ${g.rot}`).join(' · ')}). Sem marcar, ${aqui.length === 1 ? 'fica fora do escopo só o volume daqui' : `ficam fora do escopo só os ${aqui.length} daqui`}; os outros continuam no escopo.`)) : null,
+    h('p', { class: 'sub' }, `Só para motivo documentado. Marca os ${aqui.length} itens de ${tag} ${lst[0].equip ? '(' + lst[0].equip + ') ' : ''}listados aqui${outros.length ? ' e, só se você marcar a opção acima, o equipamento inteiro' : ''}. Eles saem da planta e das pendências, mas ficam na Lista (filtro "Fora do escopo"), no histórico e no pacote do dia. Dá para desfazer. Item que não foi encontrado é divergência, não fora do escopo.`),
     h('div', { class: 'grid' },
       h('label', {}, 'Motivo', h('select', { name: 'motivo', id: 'loteMotivo' }, h('option', { value: '' }, '—'), ESC().motivos_fora.map(m => h('option', { value: m }, m)))),
       h('label', {}, 'Detalhe (opcional)', h('input', { name: 'obs', placeholder: 'ex.: retirado no lote 1, em 2025' }))),
-    h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary', id: 'btnLoteFora' }, `Marcar ${alvo.length} itens`)));
+    h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary', id: 'btnLoteFora' }, outros.length ? 'Marcar fora do escopo' : `Marcar ${aqui.length} itens`)));
   modal(form);
 }
 async function notasSala(s) {
@@ -1184,7 +1204,8 @@ function thumbReg(m, s) {
   const img = h('img', { alt: m.nome }); urlFoto(m.id).then(u => { if (u) img.src = u; });
   const marcas = [m.com ? '💬' : '', m.equip ? '🔧' : '', m.ponto ? '📍' : ''].join('');
   return h('figure', { class: 'reg', 'data-foto': m.id, title: 'Tocar para comentar, ligar a um equipamento ou marcar o ponto', onclick: () => editarFoto(m.id, s) },
-    img, h('figcaption', {}, `${m.id} ${marcas}`), m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null);
+    img, h('figcaption', {}, `${m.id} ${marcas}`), m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null,
+    btnApagar(m.id, () => { if (S.painel) renderPainel(); }));
 }
 // seção "Fotos da sala": câmera contínua (foto → foto → foto, sem sair da tela) e, como alternativa, a câmera/galeria do aparelho
 function secFotos(s) {
@@ -1199,6 +1220,49 @@ function secFotos(s) {
     h('div', { class: 'thumbs', id: 'thumbsSala' }, l.map(m => thumbReg(m, s))),
     l.length ? h('p', { class: 'sub' }, 'Toque numa foto para comentar, ligar a um equipamento ou marcar o ponto na planta.') : null);
 }
+// ---------- apagar foto (v1.6.2) ----------
+// Foto que ainda não foi em pacote: some de vez do aparelho. Foto que já foi em pacote: fica marcada como descartada (não aparece mais
+// no app) e sai um registro "foto descartada" (id, arquivo, hora, quem) – no escritório o fechar_dia.py tira a foto do painel, da mesa,
+// das legendas e do relatório e guarda o arquivo numa pasta à parte. Backup e restaurar levam a foto descartada como descartada.
+// Aparelho inativo: pede a mesma confirmação explícita de registrar. Devolve uma função que desfaz (ou null, se nada foi apagado).
+async function apagarFoto(id) {
+  podeRegistrar();
+  const f = await DB.get('fotos', id); if (!f || f.desc) return null;
+  const ts = Date.now(), por = S.meta.conferente || '', dono = f.item && !String(f.item).startsWith('SALA:') ? f.item : null;
+  const tiraDoItem = async () => { if (!dono) return; const e = est(dono); if (!(e.fotos || []).includes(id)) return; const n = { ...e, fotos: e.fotos.filter(x => x !== id), ts: Date.now() }; S.estado.set(dono, n); await DB.put('estado', n); };
+  const poeNoItem = async () => { if (!dono) return; const e = est(dono); if ((e.fotos || []).includes(id)) return; const n = { ...e, fotos: [...(e.fotos || []), id].sort(), ts: Date.now() }; S.estado.set(dono, n); await DB.put('estado', n); };
+  const noIndice = fn => { if (!f.reg) return; const l = S.fotosSala.get(f.sala_id) || []; fn(l); S.fotosSala.set(f.sala_id, l); };
+  const prepDono = Object.values(S.meta.prep || {}).find(p => p.foto === id);
+  const extra = { foto: id, nome: nomeFoto(f.nome), foto_ts: f.ts, sala: f.sala_id || f.sala || '', item: dono || '', por };
+  if (!f.exportado) {   // ainda não foi em pacote: apaga de vez
+    await DB.del('fotos', id); S.thumbUrl.delete(id); noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); });
+    await tiraDoItem(); if (prepDono) { S.meta.prep = { ...S.meta.prep, [prepDono.id]: { ...prepDono, foto: '', ts } }; await DB.put('meta', S.meta.prep, 'prep'); }
+    await log('foto', id, 'foto apagada', extra.nome, { ...extra, antes_do_pacote: 1 });
+    return async () => {
+      await DB.put('fotos', f); noIndice(l => { const { blob, ...m } = f; l.push(m); l.sort((a, b) => a.ts - b.ts); }); await poeNoItem();
+      if (prepDono) { S.meta.prep = { ...S.meta.prep, [prepDono.id]: { ...S.meta.prep[prepDono.id], foto: id, ts: Date.now() } }; await DB.put('meta', S.meta.prep, 'prep'); }
+      await log('foto', id, 'foto restaurada', extra.nome, { ...extra, antes_do_pacote: 1 });
+    };
+  }
+  const d = { ...f, desc: 1, desc_ts: ts, desc_por: por, ts_edit: ts }; await DB.put('fotos', d);
+  noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) l[i] = { ...l[i], desc: 1, desc_ts: ts, desc_por: por }; }); await tiraDoItem();
+  await log('foto', id, 'foto descartada', extra.nome, extra);
+  return async () => {
+    const { desc, desc_ts, desc_por, ...v } = d; await DB.put('fotos', { ...v, ts_edit: Date.now() });
+    noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) { const { desc: _d, desc_ts: _t, desc_por: _p, ...m } = l[i]; l[i] = m; } }); await poeNoItem();
+    await log('foto', id, 'foto restaurada', extra.nome, extra);
+  };
+}
+// "Apagar" na galeria (sala e item): pede confirmação
+async function apagarComConfirmacao(id, depois) {
+  const f = await DB.get('fotos', id); if (!f) return false;
+  if (!confirm(`Apagar a foto ${id}?\n\n${f.exportado ? 'Ela já foi em um pacote do dia: sai também do painel e do relatório no escritório (o arquivo fica guardado lá, à parte).' : 'Ela ainda não foi em pacote: some de vez deste aparelho.'}`)) return false;
+  const desfaz = await apagarFoto(id); if (!desfaz) return false;
+  if (depois) depois();
+  toastAcao(`Foto ${id} apagada`, 'desfazer', async () => { await desfaz(); refrescar(); toast(`Foto ${id} de volta`); });
+  return true;
+}
+const btnApagar = (id, depois) => h('button', { type: 'button', class: 'mini apagar', 'data-apagar': id, title: 'Apagar esta foto', onclick: async ev => { ev.stopPropagation(); ev.preventDefault(); await apagarComConfirmacao(id, depois); } }, '🗑 Apagar');
 async function addFotoSala(file, s) {
   const o = oficialDe(s);  // foto tirada numa marcação: fica na sala oficial, com a marcação guardada
   return addFoto(file, { id: 'SALA:' + o.id, tag: 'SALA' }, o.codigo && o.codigo !== '?' ? o.codigo : o.id,
@@ -1210,19 +1274,26 @@ async function abrirCamera(s) {
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } } }); }
   catch { const i = $('#inFotoCap'); if (i) { toast('Câmera do app indisponível – abrindo a câmera do aparelho'); i.click(); } return; }
   const video = h('video', { autoplay: true, playsinline: true, muted: true }); video.srcObject = stream; video.muted = true;
-  const cnt = h('b', { id: 'camN' }, '0 fotos'), ult = h('img', { id: 'camUlt', alt: '' }); let n = 0, fila = Promise.resolve();
+  const cnt = h('b', { id: 'camN' }, '0 fotos'), ult = h('img', { id: 'camUlt', alt: '' }); let n = 0, fila = Promise.resolve(); const feitas = [];
+  const lix = h('button', { type: 'button', id: 'btnCamApagar', class: 'cam-lixo', hidden: true, 'aria-label': 'Apagar a última foto', title: 'Apagar a última foto' }, '🗑');
+  const mostra = async () => { n = feitas.length; cnt.textContent = `${n} foto${n === 1 ? '' : 's'}`; lix.hidden = !n; if (n) { ult.src = await urlFoto(feitas[n - 1]); ult.dataset.foto = feitas[n - 1]; } else { ult.removeAttribute('src'); delete ult.dataset.foto; } };
+  lix.onclick = () => { fila = fila.then(async () => {   // um toque apaga a última; "desfazer" por alguns segundos; a câmera continua aberta
+    const id = feitas[feitas.length - 1]; if (!id) return; const desfaz = await apagarFoto(id); if (!desfaz) return;
+    feitas.pop(); await mostra();
+    toastAcao(`Foto ${id} apagada`, 'desfazer', async () => { await desfaz(); feitas.push(id); feitas.sort(); await mostra(); if (!$('#camera') && S.painel) renderPainel(); });
+  }).catch(x => { if (!(x && x.inativo)) toast('Não apagou: ' + x.message); }); };
   const disparar = () => {
     el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 120);
     fila = fila.then(async () => {
       let blob = null; const tr = stream.getVideoTracks()[0];
       try { if (window.ImageCapture && !window.__TEST__) blob = await new ImageCapture(tr).takePhoto(); } catch { blob = null; }  // resolução cheia do sensor, se houver
       if (!blob) { const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight; c.getContext('2d').drawImage(video, 0, 0); blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92)); }
-      const m = await addFotoSala(blob, s); n++; cnt.textContent = `${n} foto${n === 1 ? '' : 's'}`; ult.src = await urlFoto(m.id);
+      const m = await addFotoSala(blob, s); feitas.push(m.id); await mostra();
     }).catch(x => toast('Foto não gravada: ' + x.message));
   };
   const el = h('div', { id: 'camera' }, video,
     h('div', { class: 'cam-topo' }, h('b', {}, `📷 ${codSala(s)}`), h('span', {}, 'foto → foto → foto; o comentário fica para depois')),
-    h('div', { class: 'cam-barra' }, h('span', { class: 'cam-ult' }, ult, cnt),
+    h('div', { class: 'cam-barra' }, h('span', { class: 'cam-ult' }, h('span', { class: 'cam-mini' }, ult, lix), cnt),
       h('button', { id: 'btnDisparo', 'aria-label': 'Tirar foto', onclick: disparar }),
       h('button', { id: 'btnCamFim', class: 'primary', onclick: () => { if (!desempilhar('camera')) fim(); } }, 'Concluir')));
   const fim = () => { stream.getTracks().forEach(t => t.stop()); fila.then(() => { el.remove(); if (S.painel) renderPainel(); }); };
@@ -1284,7 +1355,8 @@ async function editarFoto(id, s) {
       h('div', { class: 'fl full' }, 'Ponto na planta (opcional): toque na miniatura da sala', mini,
         h('div', { class: 'sub' }, h('span', { id: 'fotoPonto' }, ponto ? `ponto ${ponto[0]}, ${ponto[1]}` : 'sem ponto'), ' ',
           h('button', { type: 'button', class: 'mini', id: 'btnLimparPonto', onclick: () => { ponto = null; mini.limpar(); $('#fotoPonto').textContent = 'sem ponto'; } }, 'Limpar ponto')))),
-    h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary', id: 'btnSalvarFoto' }, 'Salvar')));
+    h('div', { class: 'acts' }, h('button', { type: 'button', class: 'danger', id: 'btnApagarFoto', onclick: async () => { if (await apagarComConfirmacao(id)) fecharModal(); } }, '🗑 Apagar'),
+      h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary', id: 'btnSalvarFoto' }, 'Salvar')));
   modal(form);
 }
 
@@ -1391,7 +1463,7 @@ async function ficha(it) {
   const e = est(it.id);
   const sel = (nome, ops, val) => h('select', { name: nome }, h('option', { value: '' }, '—'), ops.map(o => h('option', { value: o, selected: o === val }, o)));
   const fotosBox = h('div', { class: 'thumbs' });
-  for (const fid of e.fotos) { const f = await DB.get('fotos', fid); if (f) fotosBox.append(thumb(f)); }
+  for (const fid of e.fotos) { const f = await DB.get('fotos', fid); if (f && !f.desc) fotosBox.append(thumb(f, true)); }
   // "Onde está agora": se a ficha foi aberta fora da sala de origem do item, já vem com a sala atual (a confirmar ao salvar).
   // Lista: sala atual → salas recentes → locais do move-out → todas as salas; a busca filtra por código ou nome.
   const atual = idAtual() ? salaPorId(idAtual()) : null;
@@ -1460,11 +1532,12 @@ async function ficha(it) {
       h('p', { class: 'sub' }, 'Exige o comentário (campo "Comentário" acima: onde procurou, quem confirmou) e pelo menos uma foto (abaixo). Conta como divergência no Resumo, no dashboard e na coluna Obs. da planilha.')),
     h('div', { class: 'fotos' }, h('b', {}, 'Fotos'), fotosBox,
       h('label', { class: 'btn' }, '📷 Tirar / escolher foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true, hidden: true, name: 'foto',
-        onchange: async ev => { for (const f of ev.target.files) { const fo = await addFoto(f, it); fotosBox.append(thumb(fo)); } ev.target.value = ''; } }))),
+        onchange: async ev => { for (const f of ev.target.files) { const fo = await addFoto(f, it); fotosBox.append(thumb(fo, true)); } ev.target.value = ''; } }))),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary' }, 'Salvar')));
   modal(form);
 }
-function thumb(f) { const u = URL.createObjectURL(f.blob); return h('figure', {}, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id)); }
+// miniatura de foto de item; apagar = true: com o botão "Apagar" (galeria da ficha)
+function thumb(f, apagar) { const u = URL.createObjectURL(f.blob); const fg = h('figure', { 'data-foto': f.id }, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id)); if (apagar) fg.append(btnApagar(f.id, () => fg.remove())); return fg; }
 // Safari (iPad): versões que não aceitam a opção de orientação, ou não leem arquivo com createImageBitmap, usam um <img>
 async function bitmapDe(file) {
   if (window.createImageBitmap) {
@@ -1612,7 +1685,58 @@ function telaEquip() {
 const Q_NOME = ['A conferir', ...ETAPAS], Q_COR = ['#d3d6dc', '#a9cdf6', '#2a78d6', '#7b3fa0', '#f0a030', '#0ca30c'], Q_X = { '-1': ['Divergência', '#d03b3b'], '-2': ['Fora do escopo', '#8a8f99'] };
 const etAtual = it => (foraEsc(it) ? -2 : divEsc(it) ? -1 : est(it.id).c.reduce((m, v, k) => (v ? k + 1 : m), 0));  // a última etapa feita
 const crPend = it => etAtual(it) === 4 && !crDe(it.id);  // crating pendente: na doca, sem crated
+// v1.6.2 – horas de cada etapa de cada volume, pelo histórico guardado no aparelho (para o kanban: "concluído em DD/MM HH:MM")
+async function horasEtapas() {
+  const m = new Map(), de = id => { if (!m.has(id)) m.set(id, [0, 0, 0, 0, 0]); return m.get(id); };
+  const evs = (await DB.all('eventos')).filter(e => e.tipo === 'item' || e.tipo === 'lote').sort((a, b) => a.ts - b.ts);
+  for (const e of evs) {
+    const campo = String(e.campo || '');
+    if (e.tipo === 'item') {
+      const k = ETAPAS.indexOf(campo);
+      if (k >= 0) de(e.id)[k] = e.valor ? e.ts : 0;
+      else if (campo === 'novo' || (/(^|,)enc(,|$)/.test(campo) && String(e.valor || '').startsWith('S'))) { if (!de(e.id)[0]) de(e.id)[0] = e.ts; }
+    } else if (campo === 'Conferido (todos)') for (const it of itensDoEquip(e.id)) { if (est(it.id).c[0] && !de(it.id)[0]) de(it.id)[0] = e.ts; }
+  }
+  return m;
+}
+function volumesKanban() {
+  const H = S._horas || new Map(), quem = S.meta.conferente || '', n = {}, k = {};
+  for (const it of S.itens) n[it.tag] = (n[it.tag] || 0) + 1;
+  return S.itens.map(it => {
+    const e = est(it.id), t = (H.get(it.id) || [0, 0, 0, 0, 0]).map((x, j) => (e.c[j] ? x : 0)); k[it.tag] = (k[it.tag] || 0) + 1;
+    const m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(String(it.crate || '')) || /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(String(it.nvol || ''));
+    return { id: it.id, tag: it.tag, equip: it.equip || '', lote: it.lote || '', nivel: it.nivel || '', sala: it.sala || '', vol: it.vol || '', xy: m ? [+m[1], +m[2]] : [k[it.tag], n[it.tag]], caixa: '',
+      c: e.c, elev: it.elev ? 1 : 0, cr: e.cr || '', esc: e.fora ? 'fora' : e.diverg ? 'diverg' : 'ativo', motivo: e.fora || e.diverg || '', reg: !!e.ts, t, q: t.map(x => (x ? quem : '')),
+      cr_t: e.cr === 'S' ? (e.cr_ts || 0) : 0, cr_q: e.cr === 'S' ? (e.cr_por || '') : '', foto: (e.fotos || [])[e.fotos.length - 1] || '', nf: (e.fotos || []).length, onde: e.onde || '',
+      aloc: !e.onde && !it.local && !it.area && !it.sub && !(S.seed.plantas.SL && (it.sala === (S.seed.plantas.SL.sala_itens || 'SALA LIMPA') || it.planta_novo === 'SL')) ? 1 : 0 };
+  });
+}
+function telaKanban(box) {
+  if (!document.getElementById('kbCss')) document.head.append(h('style', { id: 'kbCss' }, KB_CSS));
+  const f = S.fkb || (S.fkb = { lote: '', nivel: '', sala: '', et: '', pend: false }); S.kbAb = S.kbAb || new Set();
+  if (!S._horas || S._horasN !== (S.meta.pendentes || 0)) { const n = S.meta.pendentes || 0; horasEtapas().then(m => { S._horas = m; S._horasN = n; if (S.view === 'quadro' && S.qModo !== 'quad') render(); }); }
+  const vols = volumesKanban(), m = kbModelo(vols, f);
+  const sel = (id, k, rot, ops, nomes) => h('select', { id, onchange: ev => { f[k] = ev.target.value; render(); } }, h('option', { value: '' }, rot), ops.map((o, i) => h('option', { value: o, selected: String(f[k]) === String(o) }, nomes ? nomes[i] : o)));
+  box.append(h('div', { class: 'filtros sel', id: 'kbFiltros' }, sel('kbLote', 'lote', 'Todos os lotes', m.lotes), sel('kbNivel', 'nivel', 'Todos os andares', m.niveis), sel('kbSala', 'sala', 'Todas as salas de origem', m.salas),
+    sel('kbEtapa', 'et', 'Todas as etapas', KB_COLS.map((_, k) => k), KB_COLS),
+    h('label', { class: 'chk', id: 'kbPendL' }, h('input', { type: 'checkbox', id: 'kbPend', checked: !!f.pend, onchange: ev => { f.pend = ev.target.checked; render(); } }), ' só pendentes (etapa incompleta ou alerta)')),
+    h('p', { class: 'sub', id: 'kbN' }, `${m.nEq} equipamentos · ${m.nVol} volumes no escopo · cada cartão fica na coluna da etapa em andamento · toque no cartão para ver os volumes`));
+  const area = h('div', { id: 'kbArea', html: kbHtml(m, S.kbAb) });
+  area.addEventListener('click', ev => {
+    const x = ev.target.closest('[data-kbx]'), v = ev.target.closest('[data-kbv]');
+    if (v) { const it = S.byId.get(v.dataset.kbv); if (it) ficha(it); return; }
+    if (x) { const k = x.dataset.kbx, abriu = !S.kbAb.has(k); abriu ? S.kbAb.add(k) : S.kbAb.delete(k); render();
+      if (abriu) requestAnimationFrame(() => { const d = document.querySelector(`.kb-det[data-kbdet="${CSS.escape(k)}"]`); if (d && d.offsetParent) d.scrollIntoView({ block: 'start' }); }); }
+  });
+  area.querySelectorAll('img[data-kbfoto]').forEach(im => urlFoto(im.dataset.kbfoto).then(u => { if (u) im.src = u; }));
+  box.append(area);
+}
 function telaQuadro() {
+  const modo = S.qModo === 'quad' ? 'quad' : 'kanban';
+  const troca = h('div', { class: 'q-modo', id: 'qModo' },
+    h('button', { class: 'chip' + (modo === 'kanban' ? ' on' : ''), id: 'qModoKanban', onclick: () => { S.qModo = 'kanban'; render(); } }, 'Por atividade (kanban)'),
+    h('button', { class: 'chip' + (modo === 'quad' ? ' on' : ''), id: 'qModoQuad', onclick: () => { S.qModo = 'quad'; render(); } }, 'Por volume (quadrados)'));
+  if (modo === 'kanban') { const bx = h('div', { class: 'quadro kanban', id: 'kanban' }, troca); telaKanban(bx); return bx; }
   const f = S.fqd || (S.fqd = { nivel: '', sala: '', et: '', crp: false });
   const uniq = l => [...new Set(l.filter(Boolean))].sort();
   const conta = k => S.itens.filter(i => etAtual(i) === k).length;
@@ -1621,7 +1745,7 @@ function telaQuadro() {
   const sel = (id, k, rot, ops) => h('select', { id, onchange: ev => { f[k] = ev.target.value; render(); } }, h('option', { value: '' }, rot), ops.map(o => h('option', { value: o, selected: f[k] === o }, o)));
   const l = S.itens.filter(i => (!f.nivel || i.nivel === f.nivel) && (!f.sala || i.sala === f.sala) && (f.et === '' || etAtual(i) === +f.et) && (!f.crp || crPend(i)));
   const nCr = S.itens.filter(i => crDe(i.id) === 'S' && etAtual(i) >= 0).length, nCrp = S.itens.filter(crPend).length;
-  const box = h('div', { class: 'quadro', id: 'quadro' },
+  const box = h('div', { class: 'quadro', id: 'quadro' }, troca,
     h('div', { class: 'q-resumo', id: 'qResumo' }, Q_NOME.map((n, k) => chip(k, n, Q_COR[k])), chip(-1, Q_X[-1][0], Q_X[-1][1]), chip(-2, Q_X[-2][0], Q_X[-2][1]),
       h('button', { class: 'q-chip' + (f.crp ? ' on' : ''), id: 'qCrp', onclick: () => { f.crp = !f.crp; render(); } }, h('b', {}, nCrp), h('span', {}, 'crating pendente'))),
     h('div', { class: 'filtros sel', id: 'qFiltros' }, sel('qNivel', 'nivel', 'Todos os andares', uniq(S.itens.map(i => i.nivel))), sel('qSala', 'sala', 'Todas as salas de origem', uniq(S.itens.map(i => i.sala)))),
@@ -1662,7 +1786,9 @@ function renderVista() {
         peso ? `peso total ${peso.toLocaleString('pt-BR')} kg${semPeso ? ` (${semPeso} sem peso)` : ''}` : null,
         eq.dia_caminhao ? `🚚 ${eq.dia_caminhao.split('-').reverse().join('/')}` : null, eq.book ? `book ${eq.book}` : null].filter(Boolean).join(' · ')),
       h('div', { class: 'sub' }, barraEtapas(its), ` ${situacaoEquip(its)}`)),
-    h('div', { class: 'pact' }, h('button', { class: 'x', onclick: fecharVista, 'aria-label': 'Fechar' }, '✕')));
+    h('div', { class: 'pact' },
+      at.length ? h('button', { class: 'fora-btn', id: 'btnForaEquip', title: ESC().rotulo_fora, onclick: () => loteFora(tag, its) }, '⊘ Fora do escopo (equipamento inteiro)') : null,
+      h('button', { class: 'x', onclick: fecharVista, 'aria-label': 'Fechar' }, '✕')));
   const body = h('div', { class: 'pbody' });
   body.append(h('p', { class: 'sub regra' }, sAqui ? `Você está em ${rotuloSala(sAqui)}: só os volumes desta sala podem ser marcados aqui. Os das outras salas aparecem para consulta.`
     : 'Conferência é presença física, sala a sala: os volumes aparecem para consulta. Abra a sala ("Ir para a sala") para marcar.'));
@@ -1675,7 +1801,7 @@ function renderVista() {
     for (const it of lst) {
       const row = linhaItem(it, !ehAqui); const e = est(it.id); const o = salaOrigem(it);
       row.querySelector('.info').append(h('div', { class: 'meta orig' }, `origem ${o ? nomeLocal(o) : (it.sala || '—')} · agora ${g.rot}${g.informado ? ' (informado)' : ''} · ${PROX[proxima(it)]}`));
-      if (e.fotos.length) { const tb = h('div', { class: 'thumbs mini-th' }); row.append(tb); for (const fid of e.fotos) DB.get('fotos', fid).then(fo => { if (fo) tb.append(thumb(fo)); }); }
+      if (e.fotos.length) { const tb = h('div', { class: 'thumbs mini-th' }); row.append(tb); for (const fid of e.fotos) DB.get('fotos', fid).then(fo => { if (fo && !fo.desc) tb.append(thumb(fo)); }); }
       sec.append(row);
     }
     body.append(sec);
@@ -1751,8 +1877,20 @@ function secPrep() {
         h('label', {}, 'Data ', h('input', { type: 'date', 'data-prepdata': b.id, value: p.data || '', onchange: async ev => { await setPrep(b, { data: ev.target.value }, 'data', ev.target.value); } })),
         h('input', { type: 'text', 'data-prepcom': b.id, value: p.com || '', placeholder: `comentário (opcional) – ${DITAR}`, onchange: async ev => { await setPrep(b, { com: ev.target.value }, 'comentário', ev.target.value); } }),
         h('label', { class: 'btn mini' }, p.foto ? `📷 ${p.foto} (trocar)` : '📷 Foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, 'data-prepfoto': b.id,
-          onchange: async ev => { const fl = ev.target.files[0]; ev.target.value = ''; if (!fl) return; const fo = await addFoto(fl, null, 'PREP', { prep: b.id }); await setPrep(b, { foto: fo.id }, 'foto', fo.id); render(); } })), th)));
+          onchange: async ev => { const fl = ev.target.files[0]; ev.target.value = ''; if (!fl) return; const fo = await addFoto(fl, null, 'PREP', { prep: b.id }); await setPrep(b, { foto: fo.id }, 'foto', fo.id); render(); } })), th,
+        b.novo ? h('button', { type: 'button', class: 'mini', 'data-prepdel': b.id, title: 'Tirar este item da lista (ele foi acrescentado neste aparelho)',
+          onclick: async () => { if (!confirm(`Tirar "${b.nome}" da lista Preparação do site?`)) return; await setPrep(b, { removido: 1 }, 'item removido', b.nome); render(); } }, '✕ tirar') : null)));
   }
+  // v1.6.2: acrescentar item à lista, só com o nome – vai no pacote do dia e aparece no painel
+  const nome = h('input', { type: 'text', id: 'prepNovoNome', placeholder: 'novo item (ex.: Rampa da doca liberada)', autocomplete: 'off', maxlength: 80 });
+  const add = async () => {
+    const v = nome.value.trim(); if (!v) { toast('Escreva o nome do item'); nome.focus(); return; }
+    if (prepItens().some(b => b.nome.trim().toLowerCase() === v.toLowerCase())) { toast('Já existe um item com esse nome'); return; }
+    const ts = Date.now(), id = `x-${slug(v).toLowerCase().slice(0, 24) || 'item'}-${ts.toString(36)}`;
+    await setPrep({ id, nome: v }, { novo: 1, criado: ts }, 'novo item', v); render(); toast(`Item acrescentado: ${v}`);
+  };
+  nome.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
+  sec.append(h('div', { class: 'prep-novo', id: 'prepNovo' }, nome, h('button', { type: 'button', id: 'btnPrepNovo', onclick: add }, '+ Adicionar item')));
   return sec;
 }
 // "Entregar este aparelho" (menu ⋮): dois toques, um arquivo por toque (o navegador pode barrar dois downloads seguidos sem toque).
@@ -1894,6 +2032,9 @@ export async function montarPacote(completo, sel) {
   const ap = S.meta.aparelho || {}; Object.assign(meta, { aparelho: ap.nome || '', aparelho_id: ap.id || '', aparelho_ativo: ap.ativo !== false, ...(ap.entregue ? { aparelho_entregue: ap.entregue } : {}) });
   const prep = [...prepItens().map(b => ({ ...b, ...(S.meta.prep[b.id] || {}) })), ...Object.values(S.meta.prep).filter(p => !prepItens().some(b => b.id === p.id))].filter(p => p.ts);
   meta.n_prep = prep.length; meta.n_crated = estado.filter(e => e.cr === 'S').length;
+  // v1.6.2: fotos descartadas no aparelho depois de já terem ido em pacote (sempre a lista inteira: repetir não muda nada no escritório)
+  const descartadas = (await DB.all('fotos')).filter(f => f.desc).map(f => ({ id: f.id, nome: nomeFoto(f.nome), ts: f.ts, desc_ts: f.desc_ts || 0, desc_por: f.desc_por || '', sala: f.sala_id || f.sala || '', item: f.item || '' }));
+  meta.n_fotos_descartadas = descartadas.length;
   if (sel) meta.reexportado = true;
   const demo = !!S.seed.demo;  // pacote de demonstração: marcado no nome e no conteúdo; o escritório recusa a importação
   if (demo) { meta.demo = true; meta.aviso = 'DEMONSTRAÇÃO – não entra no controle'; }
@@ -1921,6 +2062,7 @@ ${foraL.length ? `<h3>${esc(ESC().rotulo_fora)} (${foraL.length})</h3><ul>${fora
     { name: 'vistorias.json', data: JSON.stringify(vist) },
     { name: 'fotos_sala.json', data: JSON.stringify(fotosSala) },
     { name: 'preparacao.json', data: JSON.stringify(prep) },
+    { name: 'fotos_descartadas.json', data: JSON.stringify(descartadas) },
     { name: 'fotos.json', data: JSON.stringify(fotos.map(({ blob, ...r }) => r)) },
     { name: 'resumo.html', data: resumo },
     ...fotos.map(f => ({ name: 'fotos/' + f.nome, data: f.blob })),
@@ -2052,7 +2194,7 @@ function pedirConferente(motivo) {
 }
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
-window.__APP__ = { S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
+window.__APP__ = { toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
   oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();

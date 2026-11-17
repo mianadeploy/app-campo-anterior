@@ -1,6 +1,6 @@
 // Service worker – cache do código do app (os dados ficam no IndexedDB)
-const CACHE = 'anterior-appcampo-506cc3cf28';
-const CORE = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/db.js', 'js/zip.js', 'js/qr.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'anterior-appcampo-c5374b1ba1';
+const CORE = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/db.js', 'js/zip.js', 'js/qr.js', 'js/kanban.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
 });

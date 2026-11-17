@@ -338,3 +338,17 @@ ol.passos{padding-left:22px;margin:8px 0}ol.passos li{margin:10px 0;line-height:
   .prep-item{padding:8px 10px;gap:6px 10px}.prep-bt{min-width:118px;min-height:40px;padding:6px 10px}.prep-nome{font-size:15px}
   .pi-campos{gap:6px}.pi-campos input[type=text]{flex:1 1 100%;order:5}.pi-campos input[type=date]{min-height:38px;max-width:150px}
 }
+
+/* ---------- v1.6.2 (ciclo 11): apagar foto, preparação do site editável, kanban ---------- */
+#toast.acao{display:flex;align-items:center;gap:12px;z-index:90;max-width:92vw}#toast.acao button{min-height:40px;padding:6px 14px;background:#fff;color:#1d2433;border:0;font-weight:700;border-radius:8px}
+#toast{z-index:90}
+.cam-mini{position:relative;display:inline-block}.cam-ult .cam-mini img{width:64px;height:64px}
+.cam-lixo{position:absolute;right:-14px;top:-14px;min-height:0;width:40px;height:40px;padding:0;border-radius:50%;justify-content:center;background:#fff;border:2px solid #b71c1c;font-size:19px;line-height:1}
+.cam-lixo[hidden]{display:none}.cam-ult{min-width:150px;gap:18px}
+button.mini.apagar{display:flex;width:100%;justify-content:center;margin-top:3px;min-height:34px;padding:2px 4px;font-size:12px;color:#b71c1c;border-color:#f5c2c0;background:#fff}
+.thumbs figure{position:relative}
+.prep-novo{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}.prep-novo input{flex:1 1 220px;min-height:44px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;font:inherit}
+label.chk.inteiro{display:block;background:#fff8d6;border:1px solid #e8d98a;border-radius:10px;padding:8px 10px;margin:8px 0}
+.q-modo{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.quadro.kanban{max-width:none}#kbFiltros label.chk{display:inline-flex;align-items:center;gap:6px;font-size:14px}
+.phead .pact .fora-btn{font-size:13px}
