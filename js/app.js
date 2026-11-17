@@ -3,7 +3,7 @@ import * as DB from './db.js';
 import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
 
-export const APP_VERSION = '1.5.1';
+export const APP_VERSION = '1.6.1';
 const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
@@ -12,6 +12,10 @@ const PROX = ['1 Conferir', '2 Preparar', '3 Descer', '4 Levar à doca', '5 Emba
 const ESCOPO_PADRAO = { motivos_fora: ['Lote anterior (já retirado)', 'Duplicado na lista', 'Outro (documentado)'],
   motivos_diverg: ['Não encontrado', 'Não está no site'], rotulo_fora: 'Fora do escopo (motivo documentado)', rotulo_diverg: 'Não encontrado / não está no site' };
 const ESC = () => ({ ...ESCOPO_PADRAO, ...((S.seed && S.seed.escopo) || {}) });
+// v1.6.0 (ciclo 10) – "Preparação do site": a lista vem do pacote de dados (seed.preparacao, montada a partir do config do escritório);
+// pacote de dados sem ela (anterior ao ciclo 10): vale esta lista mínima.
+const PREP_PADRAO = [{ id: 'container', nome: 'Container' }, { id: 'elevador', nome: 'Elevador consertado' }, { id: 'gerador', nome: 'Gerador' }];
+const prepItens = () => (S.seed && Array.isArray(S.seed.preparacao) && S.seed.preparacao.length ? S.seed.preparacao : PREP_PADRAO);
 const S = { seed: null, itens: [], byId: new Map(), estado: new Map(), meta: {}, planta: 'L0', view: 'planta',
             zoom: { s: 1, x: 0, y: 0 }, painel: null, plantaUrls: {}, salasEd: [], edit: false, draw: null,
             filtro: null, abertos: {}, det: false, detIt: new Set(), eqSel: null, fq: {}, alias: {}, aliasInv: {}, fotosSala: new Map(), thumbUrl: new Map(), ultPac: null };
@@ -140,8 +144,10 @@ function abrirMenu() {
   modal(h('div', { class: 'ficha', id: 'menu' }, h('h2', {}, 'Menu'),
     h('div', { class: 'menu-ops' },
       h('button', { id: 'mnCalibrar', onclick: () => { fecharModal(); setTimeout(telaCalibrar, 150); } }, '🕒 Calibrar relógio (fotógrafo)'),
-      s && v && v.sala === oficialDe(s).id ? h('button', { id: 'mnAbertura', onclick: () => { fecharModal(); setTimeout(() => telaAbertura(s), 150); } }, `📺 Mostrar QR de ${codSala(oficialDe(s))}`) : null),
+      s && v && v.sala === oficialDe(s).id ? h('button', { id: 'mnAbertura', onclick: () => { fecharModal(); setTimeout(() => telaAbertura(s), 150); } }, `📺 Mostrar QR de ${codSala(oficialDe(s))}`) : null,
+      h('button', { id: 'mnEntregar', onclick: () => { fecharModal(); setTimeout(entregarAparelho, 150); } }, '📲 Entregar este aparelho')),
     h('p', { class: 'sub' }, 'Calibrar relógio: o fotógrafo fotografa essa tela no início do dia; a foto dá o desvio do relógio da câmera.'),
+    h('p', { class: 'sub', id: 'mnAparelho' }, `Aparelho: ${S.meta.aparelho.nome} · ${inativo() ? 'INATIVO (os dados estão em outro aparelho)' : 'ativo'}. Entregar: para passar o trabalho a outro aparelho (um em uso por vez).`),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Fechar'))));
 }
 // ---------- tela de abertura da sala e calibração do relógio (ciclo 8) ----------
@@ -208,7 +214,7 @@ async function migrarVistoriaManual() {
 }
 
 // ---------- estado ----------
-const novoEstado = id => ({ id, c: [0, 0, 0, 0, 0], enc: '', estado: '', onde: '', com: '', fotos: [], fora: '', fora_obs: '', diverg: '', diverg_obs: '', ts: 0 });
+const novoEstado = id => ({ id, c: [0, 0, 0, 0, 0], enc: '', estado: '', onde: '', com: '', fotos: [], fora: '', fora_obs: '', diverg: '', diverg_obs: '', cr: '', ts: 0 });
 const est = id => S.estado.get(id) || novoEstado(id);
 // fora do escopo (motivo documentado) e divergência (não encontrado / não está no site, com comentário e foto):
 // os dois saem da planta e das pendências; ficam na lista, no histórico e no pacote, cada um contado à parte
@@ -236,7 +242,39 @@ async function log(tipo, id, campo, valor, extra = {}) {
   S.meta.pendentes = (S.meta.pendentes || 0) + 1; await DB.put('meta', S.meta.pendentes, 'pendentes');
   renderStatus();
 }
+// ---------- troca de aparelho (v1.6.0): um aparelho em uso por vez ----------
+// Cada aparelho tem um id e um nome (vão no meta.json do pacote). "Entregar este aparelho" (menu ⋮) fecha o dia, gera o backup completo
+// e deixa o aparelho INATIVO: faixa cinza, e registrar pede confirmação explícita. "Restaurar backup" torna o aparelho ativo.
+function nomePadraoAparelho() {
+  const ua = navigator.userAgent || '';
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1)) return 'iPad';
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'Celular' : 'Tablet';
+  return 'Computador';
+}
+async function carregarAparelho() {
+  let a = await DB.get('meta', 'aparelho');
+  if (!a || !a.id) {
+    const r = new Uint32Array(2); try { crypto.getRandomValues(r); } catch { r[0] = Math.random() * 2 ** 32; r[1] = Date.now() % 2 ** 32; }
+    a = { id: 'AP-' + (r[0].toString(36) + r[1].toString(36)).slice(0, 10).toUpperCase(), nome: nomePadraoAparelho(), ativo: true, desde: Date.now() };
+    await DB.put('meta', a, 'aparelho');
+  }
+  S.meta.aparelho = a;
+}
+const inativo = () => !!(S.meta.aparelho && S.meta.aparelho.ativo === false);
+class Inativo extends Error { constructor() { super('aparelho inativo'); this.inativo = true; } }
+// registrar num aparelho inativo: pede confirmação explícita, uma vez por sessão (fica no histórico); sem ela, nada é gravado
+function podeRegistrar() {
+  if (!inativo() || S._regInativo) return;
+  if (!confirm('APARELHO INATIVO – os dados estão em outro aparelho.\n\nO que for registrado aqui pode conflitar com o que está sendo feito no outro aparelho. '
+    + 'O certo é receber o trabalho de volta por "Restaurar backup" (Resumo).\n\nRegistrar aqui mesmo assim?')) throw new Inativo();
+  S._regInativo = true;
+  DB.put('eventos', { ts: Date.now(), tipo: 'sistema', id: null, campo: 'registro em aparelho inativo', valor: S.meta.aparelho.nome, exportado: 0 });
+}
+window.addEventListener('unhandledrejection', ev => { if (ev.reason && ev.reason.inativo) { ev.preventDefault(); toast('Nada foi registrado: este aparelho está inativo'); } });
+
 async function setEstado(id, patch, campo, valor) {
+  podeRegistrar();
   const e = { ...est(id), ...patch, ts: Date.now() };
   S.estado.set(id, e); await DB.put('estado', e);
   await log('item', id, campo, valor);
@@ -245,10 +283,37 @@ async function toggleEtapa(it, k) {
   if (k === 2 && !it.elev) return;
   const c = [...est(it.id).c]; c[k] = c[k] ? 0 : 1;
   await setEstado(it.id, { c }, ETAPAS[k], c[k]);
+  // regra do crated: antes de embarcar o item deveria estar crated ou "não se aplica" – o app avisa, não bloqueia
+  if (k === 4 && c[4] && !est(it.id).cr) setTimeout(() => toast('⚠ Embarcado sem Crated – marque "Crated" ou "não se aplica"'), 50);
+}
+// ---------- crated (v1.6.0): estado por item, fora da sequência das 5 etapas: não → sim → não se aplica ----------
+const crDe = id => est(id).cr || '';
+async function setCrated(it, v) {
+  await setEstado(it.id, { cr: v, cr_ts: v ? Date.now() : 0, cr_por: v ? (S.meta.conferente || '') : '' }, 'Crated', v);
+}
+async function crateTodos(lst) {
+  podeRegistrar();
+  const at = ativos(lst), alvo = at.filter(it => est(it.id).c[0] && !crDe(it.id)), semConf = at.filter(it => !est(it.id).c[0]).length;
+  if (!alvo.length) { toast(semConf ? 'Nenhum volume conferido sem crated – confira antes' : 'Todos os volumes já têm crated'); return; }
+  const ts = Date.now();
+  for (const it of alvo) {
+    const e = { ...est(it.id), cr: 'S', cr_ts: ts, cr_por: S.meta.conferente || '', ts }; S.estado.set(it.id, e); await DB.put('estado', e);
+    await log('item', it.id, 'Crated', 'S', { lote: 1 });
+  }
+  await log('lote', alvo[0].tag, 'Crated (todos)', alvo.length);
+  refrescar(); toast(`${alvo.length} volume${alvo.length === 1 ? '' : 's'} crated${semConf ? ` · ${semConf} ainda não conferido${semConf === 1 ? '' : 's'} ficou de fora` : ''}`);
+}
+// ---------- preparação do site (v1.6.0): lista de prontidão no Resumo – feito / não feito, data, comentário e foto ----------
+async function setPrep(b, patch, campo, valor) {
+  podeRegistrar();
+  const p = { feito: 0, data: '', com: '', foto: '', ...(S.meta.prep[b.id] || {}), ...patch, id: b.id, nome: b.nome, ts: Date.now(), por: S.meta.conferente || '' };
+  S.meta.prep = { ...S.meta.prep, [b.id]: p }; await DB.put('meta', S.meta.prep, 'prep');
+  await log('prep', b.id, campo, valor);
 }
 
 // ---------- carga ----------
 async function carregar() {
+  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {};
   const seed = await DB.get('meta', 'seed');
   if (!seed) return false;
   // pacote de dados antigo (v1.1) sem a ligação sala limpa → L2: a sala limpa passa a abrir pelo L2
@@ -259,7 +324,7 @@ async function carregar() {
   S.byId = new Map(S.itens.map(i => [i.id, i]));
   S.estado = new Map((await DB.all('estado')).map(e => [e.id, e]));
   S.salasEd = await DB.all('salas');
-  for (const k of ['pendentes', 'ultimoFechamento', 'ftSeq', 'novoSeq', 'conferente', 'vistoria', 'pendDesde', 'recentes']) S.meta[k] = await DB.get('meta', k);
+  for (const k of ['pendentes', 'ultimoFechamento', 'ultFech', 'ftSeq', 'novoSeq', 'conferente', 'vistoria', 'pendDesde', 'recentes']) S.meta[k] = await DB.get('meta', k);
   // nome da sala no Schedule (ex.: DOCA) ↔ sala da planta: "Onde está agora" pode guardar um ou outro
   S.alias = {}; S.aliasInv = {};
   for (const i of seed.itens) if (i.local && i.sala && i.sala !== i.local) { S.alias[i.sala] = i.local; S.aliasInv[i.local] = i.sala; }
@@ -347,6 +412,7 @@ function renderStatus() {
               `📷 ${S.meta.vistoria.rot || S.meta.vistoria.sala}${S.meta.vistoria.marcacao ? ' · ' + S.meta.vistoria.marcacao : ''} · ${Math.max(0, Math.round((Date.now() - S.meta.vistoria.abriu) / 60e3))} min`) : null].filter(Boolean));
   renderTopo();
   const fx = $('#faixaDemo'); if (fx) fx.hidden = !(S.seed && S.seed.demo); document.body.classList.toggle('demo', !!(S.seed && S.seed.demo));
+  const fi = $('#faixaInativo'); if (fi) fi.hidden = !inativo(); document.body.classList.toggle('inativo', inativo());
 }
 // Lista, Resumo e Equipamentos são uma camada sobre a planta: o voltar retorna à planta, com o zoom de antes
 function nav(view) {
@@ -362,6 +428,7 @@ function render() {
   if (S.view === 'planta') main.append(telaPlanta());
   else if (S.view === 'lista') { S._rol = rol; main.append(telaLista()); }
   else if (S.view === 'equip') main.append(telaEquip());
+  else if (S.view === 'quadro') main.append(telaQuadro());
   else if (S.view === 'resumo') main.append(telaResumo());
   main.scrollTop = rol;
   renderStatus();
@@ -1031,6 +1098,7 @@ function renderPainel() {
 }
 // marca/desmarca "fora do escopo" num conjunto de itens (ficha ou lote por equipamento) – reversível
 async function marcarFora(lst, motivo, obs) {
+  podeRegistrar();
   for (const it of lst) {
     const e = { ...est(it.id), fora: motivo || '', fora_obs: motivo ? (obs || '') : '', ts: Date.now() };
     S.estado.set(it.id, e); await DB.put('estado', e);
@@ -1038,6 +1106,7 @@ async function marcarFora(lst, motivo, obs) {
   }
 }
 async function marcarDiverg(lst, motivo, obs, fotoIds) {
+  podeRegistrar();
   for (const it of lst) {
     const e0 = est(it.id);
     const e = { ...e0, diverg: motivo || '', diverg_obs: motivo ? (obs || '') : '', fotos: [...new Set([...(e0.fotos || []), ...(fotoIds || [])])], ts: Date.now() };
@@ -1248,6 +1317,7 @@ function blocoEquip(tag, lst, abrir = false, sala = null) {
     eqInfo.dia_caminhao ? h('span', { class: 'cam' }, `🚚 ${eqInfo.dia_caminhao.split('-').reverse().join('/')}`) : null));
   det.append(h('div', { class: 'eq-acoes' },
     nAt ? h('button', { class: 'mini', onclick: stop(() => conferirTodos(lst)) }, '✓ Conferir todos') : null,
+    nAt ? h('button', { class: 'mini cr-btn', 'data-crlote': tag, title: 'Marca "Crated" em todos os volumes já conferidos deste equipamento que ainda não têm', onclick: stop(() => crateTodos(lst)) }, '📦 Crated (todos)') : null,
     nAt ? h('button', { class: 'mini div-btn', title: ESC().rotulo_diverg, onclick: stop(() => loteDiverg(tag, lst)) }, '⚠ Não encontrado') : null,
     nAt ? h('button', { class: 'mini fora-btn', title: ESC().rotulo_fora, onclick: stop(() => loteFora(tag, lst)) }, '⊘ Fora do escopo')
       : h('button', { class: 'mini', onclick: stop(async () => { const f = lst.filter(foraEsc), d = lst.filter(divEsc); await marcarFora(f, ''); await marcarDiverg(d, ''); await log('lote', tag, 'Voltou ao escopo (todos)', lst.length); refrescar(); toast(`${lst.length} itens de ${tag} de volta ao escopo`); }) }, '↺ Voltar ao escopo')));
@@ -1273,6 +1343,7 @@ function linhaItem(it, consulta = false) {
       !S.det ? h('button', { class: 'lnk', 'data-det': it.id, 'aria-expanded': String(det), onclick: ev => { ev.stopPropagation(); S.detIt.has(it.id) ? S.detIt.delete(it.id) : S.detIt.add(it.id); troca(); } }, det ? 'ocultar ▴' : 'Detalhes ▾') : null),
     e.fora ? h('div', { class: 'tag-fora' }, `⊘ Fora do escopo: ${e.fora}${e.fora_obs ? ' – ' + e.fora_obs : ''}`) : null,
     e.diverg ? h('div', { class: 'tag-div' }, `⚠ Divergência: ${e.diverg}${e.diverg_obs ? ' – ' + e.diverg_obs : ''}`) : null,
+    e.c[4] && !e.cr && !e.fora && !e.diverg ? h('div', { class: 'tag-div aviso-cr', 'data-avisocr': it.id }, '⚠ Embarcado sem crated – marque Crated ou "não se aplica"') : null,
     det ? h('div', { class: 'meta det' }, [it.id, it.peso ? `${it.peso} kg` : null, it.dim].filter(Boolean).join(' · ')) : null,  // o CF-ID (chave interna) fica aqui
     h('div', { class: 'meta' }, [e.onde ? `📍 ${rotuloSala(salaPorId(e.onde)) || e.onde}` : (prevista(it) ? '📍 posição prevista (2016)' : it.pos_informada ? `📍 ${it.pos_fonte}` : null),
       e.enc ? `Encontrado: ${e.enc}` : null, e.estado || null, e.fotos.length ? `📷 ${e.fotos.length}` : null].filter(Boolean).join(' · ') || ' '));
@@ -1288,10 +1359,16 @@ function linhaItem(it, consulta = false) {
     bts.append(h('button', { class: 'et' + (e.c[k] ? ' on' : '') + (na ? ' na' : ''), disabled: na || consulta, title: nm, 'data-k': k,
       onclick: async () => { await toggleEtapa(it, k); troca(); } }, h('i', {}, k + 1), h('span', {}, nm)));
   });
+  // crated: do mesmo tamanho dos botões de etapa, mas à parte (não é etapa). Vale depois de "Conferido"; cada toque: não → sim → não se aplica
+  const cr = e.cr || '';
+  bts.append(h('button', { class: 'et cr' + (cr === 'S' ? ' on' : cr === 'NA' ? ' nap' : ''), disabled: consulta || (!e.c[0] && !cr), 'data-cr': cr || 'N',
+    title: !e.c[0] && !cr ? 'Crated: só depois de conferido' : 'Crated: cada toque troca – não → sim → não se aplica', 'aria-label': `Crated: ${cr === 'S' ? 'sim' : cr === 'NA' ? 'não se aplica' : 'não'}`,
+    onclick: async () => { await setCrated(it, cr === '' ? 'S' : cr === 'S' ? 'NA' : ''); troca(); } }, h('i', {}, cr === 'S' ? '✓' : cr === 'NA' ? '–' : 'C'), h('span', {}, cr === 'NA' ? 'Crated n/a' : 'Crated')));
   row.append(info, bts);
   return row;
 }
 async function conferirTodos(lst) {
+  podeRegistrar();
   lst = ativos(lst);
   for (const it of lst) { const c = [...est(it.id).c]; if (!c[0]) { c[0] = 1; const e = { ...est(it.id), c, ts: Date.now() }; S.estado.set(it.id, e); await DB.put('estado', e); } }
   await log('lote', lst[0].tag, 'Conferido (todos)', lst.length);
@@ -1388,23 +1465,33 @@ async function ficha(it) {
   modal(form);
 }
 function thumb(f) { const u = URL.createObjectURL(f.blob); return h('figure', {}, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id)); }
+// Safari (iPad): versões que não aceitam a opção de orientação, ou não leem arquivo com createImageBitmap, usam um <img>
+async function bitmapDe(file) {
+  if (window.createImageBitmap) {
+    try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch { /* tenta sem a opção */ }
+    try { return await createImageBitmap(file); } catch { /* tenta pelo <img> */ }
+  }
+  const u = URL.createObjectURL(file);
+  try { const im = new Image(); im.src = u; await im.decode(); return im; } finally { setTimeout(() => URL.revokeObjectURL(u), 5000); }
+}
 export async function comprimir(file, max = 1600, q = 0.75) {
-  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
-  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
-  const w = Math.round(bmp.width * k), hh = Math.round(bmp.height * k);
+  const bmp = await bitmapDe(file); const bw = bmp.naturalWidth || bmp.width, bh = bmp.naturalHeight || bmp.height;
+  const k = Math.min(1, max / Math.max(bw, bh));
+  const w = Math.round(bw * k), hh = Math.round(bh * k);
   const cv = document.createElement('canvas'); cv.width = w; cv.height = hh;
   cv.getContext('2d').drawImage(bmp, 0, 0, w, hh);
   const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', q));
   return { blob, w, h: hh };
 }
 async function addFoto(file, it, salaOverride, extra) {
+  podeRegistrar();
   const seq = (S.meta.ftSeq || 0) + 1; S.meta.ftSeq = seq; await DB.put('meta', seq, 'ftSeq');
   const { blob, w, h: hh } = await comprimir(file);
   const o = it && est(it.id).onde; const so = o && salaPorId(o);
   const sala = salaOverride || (it ? (so ? (so.codigo !== '?' ? so.codigo : so.id) : (o || it.sala)) : 'GERAL');
   const id = `FT-${String(seq).padStart(4, '0')}`;
   const deSala = it && String(it.id).startsWith('SALA:');
-  const nome = nomeArq(deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
+  const nome = nomeArq(extra && extra.prep ? `${hoje()}_PREP_${slug(extra.prep)}_${id}.jpg` : deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
   const f = { id, item: it ? it.id : null, sala, nome, blob, w, h: hh, ts: Date.now(), exportado: 0, orig: file.name || '', ...(extra || {}) };
   await DB.put('fotos', f);
   if (f.reg) { const { blob: _b, ...m } = f; if (!S.fotosSala.has(f.sala_id)) S.fotosSala.set(f.sala_id, []); S.fotosSala.get(f.sala_id).push(m); }
@@ -1455,7 +1542,7 @@ function telaLista() {
   const go = () => {
     S.q = q.value; S.fs = salaSel.value; res.innerHTML = '';
     const t = S.q.trim().toLowerCase();
-    const passa = i => S.fe == null ? true : S.fe === 'fora' ? foraEsc(i) : S.fe === 'div' ? divEsc(i) : S.fe === 'prev' ? prevista(i) && ativos([i]).length : ativos([i]).length && proxima(i) === S.fe;
+    const passa = i => S.fe == null ? true : S.fe === 'fora' ? foraEsc(i) : S.fe === 'div' ? divEsc(i) : S.fe === 'prev' ? prevista(i) && ativos([i]).length : S.fe === 'crp' ? crPend(i) : ativos([i]).length && proxima(i) === S.fe;
     let l = S.itens.filter(i => (!S.fs || i.sala === S.fs) && passa(i) &&
       (!t || [i.id, i.tag, i.equip, i.vol, i.lote].some(v => String(v || '').toLowerCase().includes(t))));
     res.append(h('div', { class: 'sub', id: 'nres' }, `${l.length} itens`));
@@ -1463,7 +1550,7 @@ function telaLista() {
     if (S._rol) { $('#main').scrollTop = S._rol; S._rol = 0; }
   };
   const nFora = S.itens.filter(foraEsc).length, nDiv = S.itens.filter(divEsc).length, nPrev = ativos(S.itens).filter(prevista).length;
-  [['Todas', null], ...PROX.map((p, k) => [p, k]), [`⚠ Divergências (${nDiv})`, 'div'], [`⊘ Fora do escopo (${nFora})`, 'fora'], [`Posição prevista 2016 (${nPrev})`, 'prev']]
+  [['Todas', null], ...PROX.map((p, k) => [p, k]), [`⚠ Divergências (${nDiv})`, 'div'], [`⊘ Fora do escopo (${nFora})`, 'fora'], [`Posição prevista 2016 (${nPrev})`, 'prev'], [`📦 Crating pendente (${S.itens.filter(crPend).length})`, 'crp']]
     .forEach(([nm, k]) => chips.append(h('button', { class: 'chip' + (S.fe === k ? ' on' : ''), 'data-fe': k ?? 'todas', onclick: () => { S.fe = k; render(); } }, nm)));
   q.oninput = go; salaSel.onchange = go;
   box.append(h('div', { class: 'filtros' }, q, salaSel), chips, res); setTimeout(go);
@@ -1519,6 +1606,38 @@ function telaEquip() {
     sel('fePorte', 'porte', 'Todos os portes', uniq(eqs.map(e => e.porte))),
     sel('feSit', 'sit', 'Todas as situações', ['A conferir', 'Conferência parcial', 'Conferido', 'Em movimento', 'Embarcado', 'Com divergência', 'Fora do escopo'])), res);
   go();
+  return box;
+}
+// ---------- quadro (v1.6.0): só leitura – uma caixa por equipamento, um quadrado por volume, colorido pela etapa atual ----------
+const Q_NOME = ['A conferir', ...ETAPAS], Q_COR = ['#d3d6dc', '#a9cdf6', '#2a78d6', '#7b3fa0', '#f0a030', '#0ca30c'], Q_X = { '-1': ['Divergência', '#d03b3b'], '-2': ['Fora do escopo', '#8a8f99'] };
+const etAtual = it => (foraEsc(it) ? -2 : divEsc(it) ? -1 : est(it.id).c.reduce((m, v, k) => (v ? k + 1 : m), 0));  // a última etapa feita
+const crPend = it => etAtual(it) === 4 && !crDe(it.id);  // crating pendente: na doca, sem crated
+function telaQuadro() {
+  const f = S.fqd || (S.fqd = { nivel: '', sala: '', et: '', crp: false });
+  const uniq = l => [...new Set(l.filter(Boolean))].sort();
+  const conta = k => S.itens.filter(i => etAtual(i) === k).length;
+  const chip = (k, nome, cor) => h('button', { class: 'q-chip' + (f.et === String(k) ? ' on' : ''), 'data-qet': k, onclick: () => { f.et = f.et === String(k) ? '' : String(k); render(); } },
+    h('b', {}, conta(k)), h('span', {}, h('i', { class: k === -2 ? 'fora' : '', style: `background-color:${cor}` }), nome));
+  const sel = (id, k, rot, ops) => h('select', { id, onchange: ev => { f[k] = ev.target.value; render(); } }, h('option', { value: '' }, rot), ops.map(o => h('option', { value: o, selected: f[k] === o }, o)));
+  const l = S.itens.filter(i => (!f.nivel || i.nivel === f.nivel) && (!f.sala || i.sala === f.sala) && (f.et === '' || etAtual(i) === +f.et) && (!f.crp || crPend(i)));
+  const nCr = S.itens.filter(i => crDe(i.id) === 'S' && etAtual(i) >= 0).length, nCrp = S.itens.filter(crPend).length;
+  const box = h('div', { class: 'quadro', id: 'quadro' },
+    h('div', { class: 'q-resumo', id: 'qResumo' }, Q_NOME.map((n, k) => chip(k, n, Q_COR[k])), chip(-1, Q_X[-1][0], Q_X[-1][1]), chip(-2, Q_X[-2][0], Q_X[-2][1]),
+      h('button', { class: 'q-chip' + (f.crp ? ' on' : ''), id: 'qCrp', onclick: () => { f.crp = !f.crp; render(); } }, h('b', {}, nCrp), h('span', {}, 'crating pendente'))),
+    h('div', { class: 'filtros sel', id: 'qFiltros' }, sel('qNivel', 'nivel', 'Todos os andares', uniq(S.itens.map(i => i.nivel))), sel('qSala', 'sala', 'Todas as salas de origem', uniq(S.itens.map(i => i.sala)))),
+    h('p', { class: 'sub', id: 'qN' }, `${l.length} de ${S.itens.length} volumes · ${nCr} crated (selo C) · só leitura: toque num quadrado para abrir o item`));
+  const lotes = new Map();
+  for (const it of l) { const lt = it.lote || '—'; if (!lotes.has(lt)) lotes.set(lt, new Map()); const m = lotes.get(lt); if (!m.has(it.tag)) m.set(it.tag, []); m.get(it.tag).push(it); }
+  for (const lt of [...lotes.keys()].sort()) {
+    const m = lotes.get(lt);
+    box.append(h('section', { class: 'q-lote', 'data-lote': lt }, h('h3', {}, `Lote ${lt} `, h('span', { class: 'sub' }, `· ${m.size} equipamento${m.size === 1 ? '' : 's'} · ${[...m.values()].reduce((a, x) => a + x.length, 0)} volumes`)),
+      h('div', { class: 'q-caixas' }, [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([tag, vs]) => h('div', { class: 'q-eq', 'data-qeq': tag },
+        h('div', { class: 't' }, h('b', {}, tag), h('span', {}, ` ${vs[0].equip || ''}`)),
+        h('div', { class: 'q-v' }, vs.map(it => { const e = etAtual(it), cr = crDe(it.id), nome = e >= 0 ? Q_NOME[e] : Q_X[e][0];
+          return h('button', { class: `q${cr === 'S' ? ' cr' : cr === 'NA' ? ' crna' : ''}${e === -2 ? ' fora' : ''}`, 'data-q': it.id, 'data-et': e, style: `--c:${e >= 0 ? Q_COR[e] : Q_X[e][1]}`,
+            title: `${it.vol || it.id} – ${nome}${cr === 'S' ? ' · crated' : ''}`, 'aria-label': `${tag} ${it.vol || ''}: ${nome}${cr === 'S' ? ', crated' : ''}`, onclick: () => ficha(it) }); })))))));
+  }
+  if (!l.length) box.append(h('p', { class: 'vazio' }, 'Nenhum volume passa no filtro.'));
   return box;
 }
 // vista do equipamento: camada por cima do que estiver aberto (aba Equipamentos ou painel da sala)
@@ -1587,14 +1706,16 @@ function telaResumo() {
   box.append(
     h('div', { class: 'cards' }, PROX.map((p, k) => h('div', { class: 'card', 'data-k': k, onclick: () => { S.fe = k; nav('lista'); } }, h('b', {}, porEtapa[k]), h('span', {}, p))),
       h('div', { class: 'card div', 'data-k': 'div', onclick: () => { S.fe = 'div'; nav('lista'); } }, h('b', {}, nDiv), h('span', {}, 'Divergências')),
-      h('div', { class: 'card fora', 'data-k': 'fora', onclick: () => { S.fe = 'fora'; nav('lista'); } }, h('b', {}, nFora), h('span', {}, 'Fora do escopo'))),
+      h('div', { class: 'card fora', 'data-k': 'fora', onclick: () => { S.fe = 'fora'; nav('lista'); } }, h('b', {}, nFora), h('span', {}, 'Fora do escopo')),
+      h('div', { class: 'card crp', 'data-k': 'crp', onclick: () => { S.fe = 'crp'; nav('lista'); } }, h('b', {}, S.itens.filter(crPend).length), h('span', {}, 'Crating pendente'))),
+    secPrep(),
     h('h3', {}, 'Por sala de origem'), tbl,
     h('h3', {}, 'Fechamento do dia'),
     h('p', {}, `Alterações desde o último fechamento: `, h('b', { id: 'pend' }, String(S.meta.pendentes || 0)), ` · último: ${S.meta.ultimoFechamento ? fmtD(S.meta.ultimoFechamento) : 'nunca'} · espaço: `, est_),
     h('div', { class: 'acts left' },
       h('button', { class: 'primary big', id: 'btnFechar', onclick: () => fecharDia(false) }, '⬇ Fechar o dia (pacote ZIP)'),
-      h('button', { id: 'btnCompartilhar', onclick: compartilhar }, S.ultPac && !(S.meta.pendentes || 0) ? `📤 Compartilhar pacote (${S.ultPac.nome.replace(/^.*_(\d{8}-\d{4})\.zip$/, '$1')})` : '📤 Compartilhar pacote'),
-      h('button', { onclick: () => fecharDia(true) }, 'Backup completo (todas as fotos)'),
+      h('button', { id: 'btnCompartilhar', onclick: compartilhar }, S.ultPac && !S.ultPac.backup && !(S.meta.pendentes || 0) ? `📤 Compartilhar pacote (${S.ultPac.nome.replace(/^.*_(\d{8}-\d{4})\.zip$/, '$1')})` : '📤 Compartilhar pacote'),
+      h('button', { id: 'btnBackup', onclick: () => fecharDia(true) }, 'Backup completo (todas as fotos)'),
       h('label', { class: 'btn' }, '↺ Restaurar backup', h('input', { type: 'file', id: 'inRestaurar', accept: ACEITA_PACOTE, hidden: true, onchange: async ev => {
         const f = ev.target.files[0]; ev.target.value = ''; if (!f) return; try { await restaurar(f); } catch (x) { alert(x.message); } } })),
       h('label', { class: 'btn' }, 'Importar pacote de dados', h('input', { type: 'file', id: 'inImportar', accept: ACEITA_PACOTE, hidden: true, onchange: async ev => {
@@ -1608,9 +1729,67 @@ function telaResumo() {
           await importarArquivo(f); await carregar(); render(); toast('Dados atualizados – estado preservado');
         } catch (x) { alert(x.message); } } }))),
     h('h3', {}, 'Configuração'), h('label', {}, 'Conferente: ', nome),
+    h('label', { class: 'cfg-ap' }, ' Nome deste aparelho: ', h('input', { id: 'inAparelho', value: S.meta.aparelho.nome, placeholder: 'ex.: Celular, iPad', onchange: async ev => {
+      const v = ev.target.value.trim(); if (!v) { ev.target.value = S.meta.aparelho.nome; return; } S.meta.aparelho = { ...S.meta.aparelho, nome: v }; await DB.put('meta', S.meta.aparelho, 'aparelho'); toast(`Aparelho: ${v}`); } })),
+    h('p', { class: 'sub', id: 'cfgAparelho' }, `Aparelho ${inativo() ? 'INATIVO – os dados estão em outro aparelho; para voltar a usar este, "Restaurar backup"' : 'ativo'} · id ${S.meta.aparelho.id} · para passar o trabalho a outro aparelho: menu ⋮ → "Entregar este aparelho".`),
     h('div', { class: 'acts left' }, h('button', { class: 'danger', id: 'btnZerar', onclick: zerarAparelho }, '🗑 Zerar dados deste aparelho')),
     h('p', { class: 'sub' }, `App v${APP_VERSION} · dados ${S.seed.versao} · ${S.itens.length} itens · ${S.seed.autoria}`));
   return box;
+}
+const isoDia = () => isoLocal(Date.now()).slice(0, 10);
+function secPrep() {
+  const sec = h('section', { class: 'prep', id: 'prepSite' }, h('h3', {}, 'Preparação do site'),
+    h('p', { class: 'sub' }, 'Prontidão do site para o move-out. Cada item: feito / não feito, data, comentário e foto (opcionais). Vai no pacote do dia.'));
+  for (const b of prepItens()) {
+    const p = S.meta.prep[b.id] || {};
+    const th = h('span', { class: 'prep-th' }); if (p.foto) urlFoto(p.foto).then(u => { if (u) th.append(h('img', { src: u, alt: p.foto })); });
+    sec.append(h('div', { class: 'prep-item' + (p.feito ? ' ok' : ''), 'data-prep': b.id },
+      h('button', { class: 'prep-bt' + (p.feito ? ' on' : ''), 'data-prepbt': b.id, 'aria-pressed': String(!!p.feito),
+        onclick: async () => { await setPrep(b, { feito: p.feito ? 0 : 1, data: p.data || (p.feito ? '' : isoDia()) }, 'feito', p.feito ? 0 : 1); render(); } }, p.feito ? '✔ Feito' : '○ Não feito'),
+      h('b', { class: 'prep-nome' }, b.nome),
+      h('div', { class: 'pi-campos' },
+        h('label', {}, 'Data ', h('input', { type: 'date', 'data-prepdata': b.id, value: p.data || '', onchange: async ev => { await setPrep(b, { data: ev.target.value }, 'data', ev.target.value); } })),
+        h('input', { type: 'text', 'data-prepcom': b.id, value: p.com || '', placeholder: `comentário (opcional) – ${DITAR}`, onchange: async ev => { await setPrep(b, { com: ev.target.value }, 'comentário', ev.target.value); } }),
+        h('label', { class: 'btn mini' }, p.foto ? `📷 ${p.foto} (trocar)` : '📷 Foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, 'data-prepfoto': b.id,
+          onchange: async ev => { const fl = ev.target.files[0]; ev.target.value = ''; if (!fl) return; const fo = await addFoto(fl, null, 'PREP', { prep: b.id }); await setPrep(b, { foto: fo.id }, 'foto', fo.id); render(); } })), th)));
+  }
+  return sec;
+}
+// "Entregar este aparelho" (menu ⋮): dois toques, um arquivo por toque (o navegador pode barrar dois downloads seguidos sem toque).
+// 1) fecha o dia (pacote, com o registro "aparelho entregue"); 2) backup completo – e o aparelho fica inativo.
+async function entregarAparelho() {
+  if (!S.meta.conferente) { await pedirConferente('O pacote e o backup levam o nome de quem conferiu.'); if (!S.meta.conferente) return; await new Promise(r => setTimeout(r, 250)); }
+  let etapa = inativo() ? 2 : 0;
+  const nome = h('input', { id: 'inNomeAparelho', value: S.meta.aparelho.nome, autocomplete: 'off' });
+  const passo1 = async () => {
+    const v = nome.value.trim(); if (v && v !== S.meta.aparelho.nome) { S.meta.aparelho = { ...S.meta.aparelho, nome: v }; await DB.put('meta', S.meta.aparelho, 'aparelho'); }
+    await log('sistema', null, 'aparelho entregue', S.meta.aparelho.nome, { aparelho_id: S.meta.aparelho.id });
+    await fecharDia(false); etapa = 1; desenha();
+  };
+  const passo2 = async () => {
+    S.meta.aparelho = { ...S.meta.aparelho, ativo: false, entregue: Date.now() }; await DB.put('meta', S.meta.aparelho, 'aparelho'); S._regInativo = false;
+    await fecharDia(true); etapa = 2; desenha();
+  };
+  const desenha = () => modal(h('div', { class: 'ficha', id: 'entrega' }, h('h2', {}, 'Entregar este aparelho'),
+    h('p', {}, 'Só um aparelho registra de cada vez. Para passar o trabalho a outro aparelho (celular ↔ iPad):'),
+    h('ol', { class: 'passos' },
+      h('li', { class: etapa > 0 ? 'feito' : '' }, h('b', {}, 'Fechar o dia'), ' – gera o pacote do dia, que vai para o escritório como sempre. ',
+        etapa === 0 ? h('button', { type: 'button', class: 'primary', id: 'btnEntrega1', onclick: passo1 }, '1 · Fechar o dia (pacote)') : h('b', {}, '✔ feito')),
+      h('li', { class: etapa > 1 ? 'feito' : '' }, h('b', {}, 'Backup completo'), ' – o arquivo BACKUP_… que o outro aparelho vai restaurar. Depois dele este aparelho fica INATIVO. ',
+        etapa === 1 ? h('button', { type: 'button', class: 'primary', id: 'btnEntrega2', onclick: passo2 }, '2 · Gerar o backup e desativar este aparelho') : etapa > 1 ? h('b', {}, '✔ feito') : null),
+      h('li', {}, h('b', {}, 'No outro aparelho'), ': com o mesmo pacote de dados carregado, Resumo → "↺ Restaurar backup" → escolher o BACKUP_… Ele passa a ser o aparelho ativo.')),
+    etapa === 0 ? h('div', { class: 'grid' }, h('label', { class: 'full' }, 'Nome deste aparelho (vai nos pacotes)', nome)) : null,
+    etapa === 2 ? h('p', { class: 'aviso-pos', id: 'entregaFim' }, `Este aparelho está INATIVO. ${S.ultPac ? `Envie o arquivo ${S.ultPac.nome} (pasta de downloads) ao outro aparelho.` : 'Envie o último BACKUP_… ao outro aparelho.'} Para voltar a usar este aparelho: "Restaurar backup" com o backup do outro.`) : null,
+    h('div', { class: 'acts' }, etapa === 2 && S.ultPac ? h('button', { type: 'button', id: 'btnEntregaShare', onclick: compartilharUltimo }, '📤 Compartilhar o backup') : null,
+      h('button', { type: 'button', id: 'btnEntregaFechar', onclick: fecharModal }, etapa === 2 ? 'Fechar' : 'Cancelar'))));
+  desenha();
+}
+// manda de novo o último arquivo gerado (aqui, o backup da entrega) para a folha de compartilhamento, sem fechar o dia outra vez
+async function compartilharUltimo() {
+  const { zip, nome } = S.ultPac; const file = new File([zip], nome, { type: 'application/zip' });
+  if (!(navigator.canShare && navigator.canShare({ files: [file] }))) { baixar(zip, nome); toast('Este navegador não compartilha este tipo de arquivo – o backup foi baixado de novo'); return 'download'; }
+  try { await navigator.share({ files: [file], title: nome }); toast('Backup entregue ao compartilhamento'); return 'share'; }
+  catch { toast('O compartilhamento não abriu – o backup está na pasta de downloads'); return 'pendente'; }
 }
 // "Manter minhas edições" (v1.3.2): a edição que NÃO mexeu na forma guardou uma cópia do contorno do pacote antigo. Antes de
 // trocar o pacote, essa cópia sai – a sala passa a usar o contorno do pacote novo e continua com código, nome e "revisada".
@@ -1644,14 +1823,15 @@ async function restaurar(file) {
   const meta = td('meta.json'), estado = td('estado.json');
   if (!meta || !estado) throw new Error('Este ZIP não é um backup nem um pacote do dia do App de Campo');
   if (!!meta.demo !== !!S.seed.demo) throw new Error(meta.demo ? 'Este arquivo é de DEMONSTRAÇÃO: não entra num aparelho com o pacote oficial.' : 'Este aparelho está com o pacote de DEMONSTRAÇÃO: não recebe backup do controle.');
-  const fotosM = td('fotos.json') || [], salas = td('salas_editadas.json') || [], novos = td('novos.json') || [], eventos = td('eventos.json') || [];
+  const fotosM = td('fotos.json') || [], salas = td('salas_editadas.json') || [], novos = td('novos.json') || [], eventos = td('eventos.json') || [], prep = td('preparacao.json');
   const comBlob = fotosM.filter(f => z['fotos/' + f.nome]);
   const ok = await new Promise(res => {
     const fim = v => { res(v); fecharModal(); };
     modal(h('div', { class: 'ficha', id: 'confRestaurar' }, h('h2', {}, `Restaurar ${meta.completo ? 'backup completo' : 'pacote do dia'}`),
       h('p', {}, `${file.name} · gerado em ${fmtD(meta.gerado)} · conferente ${meta.conferente || '—'} · dados ${meta.seed}`),
       h('ul', {}, h('li', {}, `${estado.length} itens com estado (substitui o estado deste aparelho)`), h('li', {}, `${comBlob.length} fotos`),
-        h('li', {}, `${salas.length} salas editadas`), h('li', {}, `${novos.length} itens não previstos`)),
+        h('li', {}, `${salas.length} salas editadas`), h('li', {}, `${novos.length} itens não previstos`),
+        h('li', { id: 'restAtivo' }, `Este aparelho (${S.meta.aparelho.nome}) passa a ser o aparelho ATIVO${meta.aparelho ? ` – o trabalho vem de "${meta.aparelho}"` : ''}`)),
       meta.seed !== S.seed.versao ? h('p', { class: 'aviso-pos' }, `⚠ O backup foi feito com outro pacote de dados (${meta.seed}); o deste aparelho é ${S.seed.versao}.`) : null,
       !meta.completo ? h('p', { class: 'sub' }, 'Pacote do dia: traz o estado completo, mas só as fotos daquele dia. Para trazer todas as fotos, use um BACKUP_*.zip.') : null,
       h('p', { class: 'sub' }, 'O que foi feito neste aparelho depois desse arquivo se perde.'),
@@ -1661,15 +1841,21 @@ async function restaurar(file) {
   if (!ok) return;
   await DB.clear('estado'); await DB.clear('salas');
   for (const { onde_label, ...e } of estado) await DB.put('estado', e);
-  for (const f of comBlob) await DB.put('fotos', { ...f, nome: nomeFoto(f.nome), blob: new Blob([z['fotos/' + f.nome]], { type: 'image/jpeg' }), exportado: 1 });
+  for (const f of comBlob) await DB.put('fotos', { ...f, nome: nomeFoto(f.nome), blob: new Blob([z['fotos/' + f.nome]], { type: 'image/jpeg' }), exportado: f.exportado ? 1 : 0 });
   for (const s_ of salas) await DB.put('salas', s_);
   for (const n of novos) await DB.put('novos', n);
-  for (const { seq, ...ev } of eventos) await DB.put('eventos', { ...ev, exportado: 1 });
+  for (const { seq, ...ev } of eventos) await DB.put('eventos', { ...ev, exportado: ev.exportado ? 1 : 0 });
+  const aFechar = eventos.filter(ev => !ev.exportado).length;   // v1.6.1: backup feito antes de "Fechar o dia" – esses registros saem no próximo pacote do dia
   const maxN = (l, rx) => l.reduce((m, x) => { const r = rx.exec(x.id || ''); return r ? Math.max(m, +r[1]) : m; }, 0);
   S.meta.ftSeq = Math.max(S.meta.ftSeq || 0, maxN(fotosM, /^FT-(\d+)/)); await DB.put('meta', S.meta.ftSeq, 'ftSeq');
   S.meta.novoSeq = Math.max(S.meta.novoSeq || 0, maxN(novos, /-(\d+)$/)); await DB.put('meta', S.meta.novoSeq, 'novoSeq');
   if (meta.conferente) await DB.put('meta', meta.conferente, 'conferente');
-  await DB.put('meta', 0, 'pendentes'); await DB.put('meta', null, 'pendDesde'); await DB.put('meta', Date.parse(meta.gerado) || Date.now(), 'ultimoFechamento');
+  if (Array.isArray(prep)) await DB.put('meta', Object.fromEntries(prep.filter(p => p && p.id).map(p => [p.id, p])), 'prep');  // backup anterior à v1.6.0 não traz a lista: fica a deste aparelho
+  // quem restaura recebe o trabalho: este aparelho passa a ser o ativo
+  S.meta.aparelho = { ...S.meta.aparelho, ativo: true, recebido: Date.now(), recebido_de: meta.aparelho || '' }; await DB.put('meta', S.meta.aparelho, 'aparelho'); S._regInativo = false;
+  await DB.put('eventos', { ts: Date.now() - 1, tipo: 'sistema', id: null, campo: 'aparelho ativo', valor: `${S.meta.aparelho.nome}${meta.aparelho ? ' (recebeu de ' + meta.aparelho + ')' : ''}`, aparelho_id: S.meta.aparelho.id, exportado: 0 });
+  await DB.put('meta', aFechar, 'pendentes'); await DB.put('meta', aFechar ? Date.now() : null, 'pendDesde'); await DB.put('meta', null, 'ultFech');
+  if (!aFechar) await DB.put('meta', Date.parse(meta.gerado) || Date.now(), 'ultimoFechamento');
   await DB.put('eventos', { ts: Date.now(), tipo: 'sistema', id: null, campo: 'restaurado', valor: `${file.name} (${estado.length} estados, ${comBlob.length} fotos)`, exportado: 0 });
   await carregar(); render(); toast(`Restaurado: ${estado.length} estados, ${comBlob.length} fotos, ${salas.length} salas editadas`);
 }
@@ -1691,9 +1877,10 @@ async function zerarAparelho() {
   try { for (const k of Object.keys(localStorage)) if (k.startsWith('appcampo.')) localStorage.removeItem(k); } catch { /* sem armazenamento */ }
   location.reload();
 }
-export async function montarPacote(completo) {
-  const fotos = (await DB.all('fotos')).filter(f => completo || !f.exportado).map(f => ({ ...f, nome: nomeFoto(f.nome) }));  // pacotes antigos: "SALA:" no nome
-  const eventos = (await DB.all('eventos')).filter(e => completo || !e.exportado);
+// sel (v1.6.1): { ev: Set de seq, fotos: Set de id } – monta de novo o pacote de um fechamento já feito ("Gerar de novo o último pacote")
+export async function montarPacote(completo, sel) {
+  const fotos = (await DB.all('fotos')).filter(f => (sel ? sel.fotos.has(f.id) : completo || !f.exportado)).map(f => ({ ...f, nome: nomeFoto(f.nome) }));  // pacotes antigos: "SALA:" no nome
+  const eventos = (await DB.all('eventos')).filter(e => (sel ? sel.ev.has(e.seq) : completo || !e.exportado));
   const estado = [...S.estado.values()].filter(e => e.ts);
   // janelas de sala: "vistoria" (ciclo 7: da 1ª à última ação) ou "inspecao" (ciclo 8: da abertura do painel à saída)
   const vist = (await DB.all('eventos')).filter(e => e.tipo === 'vistoria').map(e => (e.modo === 'inspecao' ? { ...e, tipo: 'inspecao' } : e));
@@ -1703,6 +1890,11 @@ export async function montarPacote(completo) {
   const meta = { app: APP_VERSION, seed: S.seed.versao, gerado: agora.toISOString(), conferente: S.meta.conferente || '', completo: !!completo,
                  n_itens: S.itens.length, n_estado: estado.length, n_eventos: eventos.length, n_fotos: fotos.length, n_fotos_sala: fotosSala.length,
                  n_inspecao: vist.filter(e => e.tipo === 'inspecao').length };
+  // v1.6.0: aparelho (nome, id, se está ativo), lista "Preparação do site" e nº de itens com crated
+  const ap = S.meta.aparelho || {}; Object.assign(meta, { aparelho: ap.nome || '', aparelho_id: ap.id || '', aparelho_ativo: ap.ativo !== false, ...(ap.entregue ? { aparelho_entregue: ap.entregue } : {}) });
+  const prep = [...prepItens().map(b => ({ ...b, ...(S.meta.prep[b.id] || {}) })), ...Object.values(S.meta.prep).filter(p => !prepItens().some(b => b.id === p.id))].filter(p => p.ts);
+  meta.n_prep = prep.length; meta.n_crated = estado.filter(e => e.cr === 'S').length;
+  if (sel) meta.reexportado = true;
   const demo = !!S.seed.demo;  // pacote de demonstração: marcado no nome e no conteúdo; o escritório recusa a importação
   if (demo) { meta.demo = true; meta.aviso = 'DEMONSTRAÇÃO – não entra no controle'; }
   const novos = await DB.all('novos');
@@ -1728,6 +1920,7 @@ ${foraL.length ? `<h3>${esc(ESC().rotulo_fora)} (${foraL.length})</h3><ul>${fora
     { name: 'novos.json', data: JSON.stringify(novos) },
     { name: 'vistorias.json', data: JSON.stringify(vist) },
     { name: 'fotos_sala.json', data: JSON.stringify(fotosSala) },
+    { name: 'preparacao.json', data: JSON.stringify(prep) },
     { name: 'fotos.json', data: JSON.stringify(fotos.map(({ blob, ...r }) => r)) },
     { name: 'resumo.html', data: resumo },
     ...fotos.map(f => ({ name: 'fotos/' + f.nome, data: f.blob })),
@@ -1736,26 +1929,66 @@ ${foraL.length ? `<h3>${esc(ESC().rotulo_fora)} (${foraL.length})</h3><ul>${fora
   const stamp = `${hoje()}-${String(agora.getHours()).padStart(2, '0')}${String(agora.getMinutes()).padStart(2, '0')}`;
   return { zip, nome: `${completo ? 'BACKUP' : 'PACOTE'}${demo ? '_DEMO' : ''}_AppCampo_L2_${stamp}.zip`, fotos, eventos, meta };
 }
-async function fecharDia(completo) {
+// v1.6.1 – SÓ "Fechar o dia" marca eventos e fotos como exportados. O backup (botão "Backup completo" e o passo 2 de "Entregar este
+// aparelho") é uma cópia: não marca nada, não zera as alterações a fechar nem muda a data do último fechamento. Até a v1.6.0 o backup
+// marcava tudo, e um "Fechar o dia" feito depois dele saía vazio.
+async function fecharDia(completo, quieto) {
   if (!S.meta.conferente) await pedirConferente('O pacote do dia leva o nome de quem conferiu.');
   await encerrarVistoria();  // fechar o dia fecha a janela da sala atual
-  const { zip, nome, fotos: fotosP, eventos } = await montarPacote(completo);
-  const ids = new Set(fotosP.map(f => f.id)); const fotos = (await DB.all('fotos')).filter(f => ids.has(f.id));
+  if (completo) {
+    const { zip, nome } = await montarPacote(true);
+    baixar(zip, nome); S.ultPac = { zip, nome, backup: true }; window.__ULTIMO_PACOTE__ = { nome, size: zip.size };
+    render(); toast(`${nome} gerado (${(zip.size / 1e6).toFixed(1)} MB) – cópia de segurança; para o escritório, use "Fechar o dia"`); return 'backup';
+  }
+  // nada novo desde o último fechamento: não gera ZIP vazio; avisa e oferece gerar de novo o último pacote
+  if (!(await DB.all('eventos')).some(e => !e.exportado) && !(await DB.all('fotos')).some(f => !f.exportado)) { if (!quieto) avisoNadaNovo(); return 'nada'; }
+  const { zip, nome, fotos: fotosP, eventos } = await montarPacote(false);
+  const ids = new Set(fotosP.map(f => f.id)); const fotos = (await DB.all('fotos')).filter(f => ids.has(f.id)); const agora = Date.now();
   baixar(zip, nome); S.ultPac = { zip, nome };  // o pacote sempre é baixado; "Compartilhar pacote" manda o mesmo arquivo a outro app
   for (const f of fotos) { f.exportado = 1; f.nome = nomeFoto(f.nome); await DB.put('fotos', f); }
   for (const e of eventos) { e.exportado = 1; await DB.put('eventos', e); }
-  S.meta.pendentes = 0; S.meta.ultimoFechamento = Date.now(); S.meta.pendDesde = null;
+  // o que saiu neste fechamento, para "Gerar de novo o último pacote"
+  S.meta.ultFech = { ts: agora, nome, ev: eventos.map(e => e.seq), fotos: fotos.map(f => f.id) }; await DB.put('meta', S.meta.ultFech, 'ultFech');
+  S.meta.pendentes = 0; S.meta.ultimoFechamento = agora; S.meta.pendDesde = null;
   await DB.put('meta', 0, 'pendentes'); await DB.put('meta', S.meta.ultimoFechamento, 'ultimoFechamento'); await DB.put('meta', null, 'pendDesde');
   window.__ULTIMO_PACOTE__ = { nome, size: zip.size };
-  render(); toast(`${nome} gerado (${(zip.size / 1e6).toFixed(1)} MB)${S.meta.conferente ? '' : ' – ATENÇÃO: sem nome do conferente'}`);
+  render(); toast(`${nome} gerado (${(zip.size / 1e6).toFixed(1)} MB)${S.meta.conferente ? '' : ' – ATENÇÃO: sem nome do conferente'}`); return 'pacote';
+}
+// o que saiu no último fechamento: a lista guardada (v1.6.1 em diante) ou, para um fechamento feito numa versão anterior, os eventos e
+// as fotos já exportados do mesmo dia do último fechamento, até a hora dele
+async function doUltimoFechamento() {
+  const u = S.meta.ultFech, t = S.meta.ultimoFechamento; if (!t) return null;
+  if (u && u.ts === t) return { ev: new Set(u.ev), fotos: new Set(u.fotos) };
+  const d0 = new Date(t); d0.setHours(0, 0, 0, 0); const dentro = x => x.exportado && x.ts >= d0.getTime() && x.ts <= t;
+  return { ev: new Set((await DB.all('eventos')).filter(dentro).map(e => e.seq)), fotos: new Set((await DB.all('fotos')).filter(dentro).map(f => f.id)) };
+}
+// "Gerar de novo o último pacote": reexporta o que saiu no último fechamento (não marca nem desmarca nada)
+async function gerarDeNovo() {
+  const sel = await doUltimoFechamento(); if (!sel) { toast('Ainda não houve nenhum fechamento neste aparelho'); return null; }
+  const { zip, nome, meta } = await montarPacote(false, sel);
+  baixar(zip, nome); S.ultPac = { zip, nome }; window.__ULTIMO_PACOTE__ = { nome, size: zip.size };
+  render(); toast(`${nome} gerado de novo: ${meta.n_eventos} alterações e ${meta.n_fotos} fotos do último fechamento`); return { zip, nome };
+}
+function avisoNadaNovo() {
+  const u = S.meta.ultimoFechamento, d = u ? new Date(u) : null;
+  const quando = d ? `${p2(d.getDate())}/${p2(d.getMonth() + 1)} ${p2(d.getHours())}:${p2(d.getMinutes())}` : '';
+  modal(h('div', { class: 'ficha', id: 'nadaNovo' }, h('h2', {}, 'Nada novo para fechar'),
+    h('p', { id: 'nadaNovoTxt' }, u ? `Nada novo desde o último fechamento (${quando}). Nenhum arquivo foi gerado.` : 'Ainda não há nenhum registro neste aparelho. Nenhum arquivo foi gerado.'),
+    u ? h('p', { class: 'sub' }, 'Se o pacote daquele fechamento se perdeu, dá para gerá-lo de novo, com as mesmas alterações e fotos. No escritório nada entra duas vezes.') : null,
+    h('div', { class: 'acts' }, h('button', { type: 'button', id: 'btnNadaFechar', onclick: fecharModal }, 'Fechar'),
+      u ? h('button', { type: 'button', class: 'primary', id: 'btnGerarDeNovo', onclick: async () => { fecharModal(); await gerarDeNovo(); } }, '⬇ Gerar de novo o último pacote') : null)));
 }
 
 function baixar(zip, nome) { const a = h('a', { href: URL.createObjectURL(zip), download: nome }); document.body.append(a); a.click(); a.remove(); }
 // "Compartilhar pacote": folha de compartilhamento do aparelho com o ZIP (para o app de nuvem). Se ainda não há pacote desta
 // sessão, ou há alterações novas, fecha o dia antes (o pacote também é baixado). Navegador que não compartilha arquivos: só o download.
 async function compartilhar() {
-  const novo = !S.ultPac || (S.meta.pendentes || 0) > 0;
-  if (novo) await fecharDia(false);
+  const novo = !S.ultPac || S.ultPac.backup || (S.meta.pendentes || 0) > 0;
+  if (novo) {
+    S.ultPac = null; const r = await fecharDia(false, true);
+    if (r === 'nada' && !(await gerarDeNovo())) return 'nada';   // nada novo: compartilha de novo o pacote do último fechamento
+  }
+  if (!S.ultPac) return 'nada';
   const { zip, nome } = S.ultPac; const file = new File([zip], nome, { type: 'application/zip' });
   if (!(navigator.canShare && navigator.canShare({ files: [file] }))) {
     if (!novo) baixar(zip, nome);
@@ -1820,6 +2053,6 @@ function pedirConferente(motivo) {
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
 window.__APP__ = { S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
-  oficialDe, mostrarQR, entrouSala, diferenca, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
+  oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();
