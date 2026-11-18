@@ -352,3 +352,11 @@ label.chk.inteiro{display:block;background:#fff8d6;border:1px solid #e8d98a;bord
 .q-modo{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .quadro.kanban{max-width:none}#kbFiltros label.chk{display:inline-flex;align-items:center;gap:6px;font-size:14px}
 .phead .pact .fora-btn{font-size:13px}
+
+/* ---------- v1.7.0 (ciclo 12): aviso de fechamento com o envio do pacote (folha de compartilhar do aparelho) ---------- */
+.aviso-fech{border:2px solid #0ca30c;background:#eef9ee;border-radius:10px;padding:10px 12px;margin:6px 0 10px;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.aviso-fech b{font-size:15px;color:#0a6b0a;word-break:break-word}.aviso-fech p{margin:0}.aviso-fech.toque,.aviso-fech.cancelado{border-color:#f0a030;background:#fff8e8}.aviso-fech.toque b,.aviso-fech.cancelado b{color:#8a5a00}
+.aviso-fech.semshare{border-color:#8a8f99;background:#f1f3f6}.aviso-fech.semshare b{color:#333}
+.aviso-fech #btnEnviarDrive{width:100%;min-height:56px;font-size:18px;font-weight:700}
+.prep-th{display:flex;flex-wrap:wrap;gap:6px;flex:1 1 100%}.prep-th:empty{display:none}.prep-th figure{margin:0;display:flex;flex-direction:column;gap:3px;align-items:center}.prep-th figure .apagar{font-size:12px;padding:2px 6px;min-height:28px}
+.prep-th img{width:88px;height:66px}
