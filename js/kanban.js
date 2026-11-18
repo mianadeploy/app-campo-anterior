@@ -41,11 +41,20 @@ export function kbAlertas(v) {
 export function kbEtapas(at) {
   return [1, 2, 3, 4, 5, 6].map(j => { const ap = at.filter(v => kbAplica(v, j)), feitos = ap.filter(v => kbFeito(v, j)).length; return { j, tot: ap.length, feitos, completa: ap.length > 0 && feitos === ap.length }; });
 }
+// Ciclo 14 – regra de saída ("equipamento só sai total"): o cartão só entra na coluna "Embarcado" quando TODOS os volumes no escopo
+//   embarcaram. Com embarque parcial, "Embarcado" nunca é a etapa em andamento: o cartão fica na etapa anterior (a em andamento antes
+//   dela, ou a última completa) com o selo "Parcial, 13 de 14" (kbSaida). Fora do escopo e divergência não contam (não estão em "at").
+export function kbSaida(at) {
+  const tot = at.length, emb = at.filter(v => kbFeito(v, 6)).length;
+  return { tot, emb, saiu: tot > 0 && emb === tot, parcial: emb > 0 && emb < tot, txt: tot > 0 && emb === tot ? 'Saiu' : emb > 0 ? `Parcial, ${emb} de ${tot}` : '' };
+}
 export function kbColuna(at) {
   const E = kbEtapas(at); let base = 0;   // base = última etapa completa em sequência (a que não se aplica a volume nenhum é pulada)
   for (const e of E) { if (!e.tot) continue; if (e.completa) base = e.j; else break; }
-  const and = E.find(e => e.tot && e.feitos > 0 && !e.completa && (e.j !== 5 || E.slice(0, 4).every(x => !x.tot || x.completa)));
-  return { col: and ? and.j : base, andamento: !!and, base, E };
+  const and = E.find(e => e.j !== 6 && e.tot && e.feitos > 0 && !e.completa && (e.j !== 5 || E.slice(0, 4).every(x => !x.tot || x.completa)));
+  const saida = kbSaida(at);
+  if (saida.saiu) return { col: 6, andamento: false, base: 6, E, saida };   // todos os volumes embarcaram: saiu (etapa anterior por marcar vira alerta, não segura o cartão)
+  return { col: and ? and.j : base, andamento: !!and, base, E, saida };
 }
 // f: { lote, nivel, sala, et (coluna), pend } – filtros. Devolve { cols: [{ k, nome, cards, nv, nfe }], fora, div, nEq, nVol, lotes, niveis, salas }
 //   nv = volumes dos cartões da coluna; nfe = volumes (de todos os cartões que passam no filtro) com a etapa da coluna feita – é o número que
@@ -63,7 +72,7 @@ export function kbModelo(itens, f = {}) {
     if (vd.length) div.push({ ...base, lista: vd });
     if (!at.length) continue;
     const K = kbColuna(at), col = K.col, e = col >= 1 ? K.E[col - 1] : null;
-    const c = { ...base, col, prox: col, andamento: K.andamento };
+    const c = { ...base, col, prox: col, andamento: K.andamento, saida: K.saida };
     if (e) { c.tot = e.tot; c.feitos = e.feitos; c.faltam = at.filter(v => kbAplica(v, col) && !kbFeito(v, col)); }
     else { c.tot = at.length; c.feitos = 0; c.faltam = []; }   // "A conferir": nenhum volume com etapa nenhuma
     const ok = K.andamento ? K.base : col;   // a etapa completa em todos os volumes: hora do último e quem
@@ -77,7 +86,7 @@ export function kbModelo(itens, f = {}) {
       const a = kbAlertas(v); if (comReg && !v.reg && c.feitos * 2 >= c.tot) a.push('sem registro nenhum');   // a maioria já foi feita e este não tem nada: provável marcação que não pegou
       v._al = a; if (a.length) c.alertas.push({ v, a });
     }
-    c.emAndamento = K.andamento;
+    c.emAndamento = K.andamento || K.saida.parcial;   // embarque parcial também é pendência
     if (f.pend && !c.emAndamento && !c.alertas.length) continue;
     if (f.et !== undefined && f.et !== '' && +f.et !== col) continue;
     cols[col].cards.push(c); cols[col].nv += at.length;
@@ -87,7 +96,9 @@ export function kbModelo(itens, f = {}) {
   const ord = (a, b) => String(a.lote).localeCompare(String(b.lote)) || a.tag.localeCompare(b.tag);
   for (const c of cols) c.cards.sort(ord); fora.sort(ord); div.sort(ord);
   const uniq = l => [...new Set(l.filter(Boolean))].sort();
+  const todos = cols.flatMap(c => c.cards);
   return { cols, fora, div, nEq: cols.reduce((s, c) => s + c.cards.length, 0), nVol: cols.reduce((s, c) => s + c.nv, 0),
+    nSaiu: todos.filter(c => c.saida.saiu).length, nParcial: todos.filter(c => c.saida.parcial).length,
     lotes: uniq(itens.map(v => v.lote)), niveis: uniq(itens.map(v => v.nivel)), salas: uniq(itens.map(v => v.sala)) };
 }
 function kbLinhaVol(v) {
@@ -109,6 +120,7 @@ function kbCartao(c, abertos) {
     <button type="button" class="kb-top" data-kbx="${kbEsc(c.tag)}" aria-expanded="${ab ? 'true' : 'false'}"><b>${kbEsc(c.tag)}</b><span class="kb-nm">${kbEsc(c.equip)}</span><small>${c.at.length} vol. ${ab ? '▴' : '▾'}</small></button>
     <div class="kb-bar" title="${nomeEt}: ${c.feitos} de ${c.tot}"><i style="width:${pc}%;background:${KB_COR[c.col]}"></i></div>
     <div class="kb-l1" data-kbprog="${c.feitos}/${c.tot}"><b>${c.col ? `${nomeEt} ${c.feitos}/${c.tot}` : `A conferir · ${c.tot} vol.`}</b></div>
+    ${c.saida && c.saida.parcial ? `<div class="kb-parcial" data-kbparcial="${c.saida.emb}/${c.saida.tot}">${c.saida.txt} embarcados – o equipamento só sai com todos</div>` : ''}
     ${c.concl ? `<div class="kb-ok" data-kbconcl="${c.concl.ts || 0}">✔ ${c.concl.nome}: concluído ${c.concl.ts ? 'em ' + kbData(c.concl.ts) : '(sem hora no histórico)'}${c.concl.quem ? ' (' + kbEsc(c.concl.quem) + ')' : ''}</div>` : ''}
     ${falt.length && c.feitos ? `<div class="kb-falta" data-kbfalta="${falt.length}">${falt.length === 1 ? 'falta' : 'faltam ' + falt.length}: ${falt.slice(0, 8).map(kbFaltaVol).join(', ')}${falt.length > 8 ? '…' : ''}</div>` : ''}
     ${c.alertas.length ? `<div class="kb-al" data-kbal="${c.alertas.length}">⚠ ${c.alertas.slice(0, 3).map(x => `${kbVol(x.v)}: ${x.a.map(kbEsc).join(', ')}`).join(' · ')}${c.alertas.length > 3 ? ` · e mais ${c.alertas.length - 3}` : ''}</div>` : ''}
@@ -130,12 +142,13 @@ export function kbHtml(m, abertos) {
       c.cards.map(x => { const cab = x.lote !== lt ? `<div class="kb-lote">Lote ${kbEsc(x.lote)}</div>` : ''; lt = x.lote; return cab + kbCartao(x, abertos); }).join('') || '<p class="kb-nada">—</p>'}</section>`; };
   // em tela larga os volumes do cartão aberto aparecem num quadro de largura inteira, acima das colunas (dentro da coluna ficaria estreito);
   // em tela estreita (celular) aparecem dentro do próprio cartão
-  const det = m.cols.flatMap(c => c.cards).filter(c => abertos && abertos.has(c.tag)).map(c => `<section class="kb-det" data-kbdet="${kbEsc(c.tag)}"><h3><i style="background:${KB_COR[c.col]}"></i>${kbEsc(c.tag)} <span>${kbEsc(c.equip)} · lote ${kbEsc(c.lote)} · ${c.at.length} volume(s) · ${KB_COLS[c.col]}</span><button type="button" data-kbx="${kbEsc(c.tag)}">fechar ✕</button></h3><div class="kb-vols">${c.vs.map(kbLinhaVol).join('')}</div></section>`).join('');
+  const det = m.cols.flatMap(c => c.cards).filter(c => abertos && abertos.has(c.tag)).map(c => `<section class="kb-det" data-kbdet="${kbEsc(c.tag)}"><h3><i style="background:${KB_COR[c.col]}"></i>${kbEsc(c.tag)} <span>${kbEsc(c.equip)} · lote ${kbEsc(c.lote)} · ${c.at.length} volume(s) · ${KB_COLS[c.col]}${c.saida && c.saida.parcial ? ' · ' + c.saida.txt + ' embarcados' : ''}</span><button type="button" data-kbx="${kbEsc(c.tag)}">fechar ✕</button></h3><div class="kb-vols">${c.vs.map(kbLinhaVol).join('')}</div></section>`).join('');
   return `${det}<div class="kb" id="kb">${m.cols.map(col).join('')}</div>`
     + kbFaixa(m.div, 'kb-div', 'Divergências', 'não entram nos totais', abertos)
     + kbFaixa(m.fora, 'kb-fora', 'Fora do escopo', 'motivo documentado; não entram nos totais', abertos);
 }
 export const KB_CSS = `
+.kb-parcial{font-size:12px;font-weight:700;color:#8a4b00;background:#fff1d6;border:1px solid #f0a030;border-radius:6px;padding:2px 6px;margin:3px 0}
 .kb{display:grid;grid-template-columns:repeat(7,minmax(170px,1fr));gap:8px;align-items:start;overflow-x:auto;padding-bottom:6px}
 .kb-col{background:#e9edf3;border-radius:10px;padding:6px;min-width:0}.kb-col h3{margin:2px 4px 6px;font-size:13px;color:#1F3864;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .kb-col h3 i{width:11px;height:11px;border-radius:3px;border:1px solid rgba(0,0,0,.3);display:inline-block}.kb-col h3 small,.kb-faixa h3 small{font-weight:400;color:#52514e;font-size:11px}.kb-col h3 small.kb-nfe{flex-basis:100%;color:#1F3864;font-weight:700}

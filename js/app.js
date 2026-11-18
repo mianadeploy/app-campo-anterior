@@ -4,7 +4,7 @@ import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
 import { KB_COLS, KB_CSS, kbModelo, kbHtml, kbPos } from './kanban.js';
 
-export const APP_VERSION = '1.7.0';
+export const APP_VERSION = '1.8.0';
 const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
@@ -371,7 +371,7 @@ async function carregar() {
   S.byId = new Map(S.itens.map(i => [i.id, i]));
   S.estado = new Map((await DB.all('estado')).map(e => [e.id, e]));
   S.salasEd = await DB.all('salas');
-  for (const k of ['pendentes', 'ultimoFechamento', 'ultFech', 'ftSeq', 'novoSeq', 'conferente', 'vistoria', 'pendDesde', 'recentes']) S.meta[k] = await DB.get('meta', k);
+  for (const k of ['pendentes', 'ultimoFechamento', 'ultFech', 'ftSeq', 'novoSeq', 'conferente', 'vistoria', 'pendDesde', 'recentes', 'shareRecusado']) S.meta[k] = await DB.get('meta', k);
   await unificarPrep();   // v1.7.0: item da Preparação feito à mão que chegou no pacote de dados com o mesmo nome
   // nome da sala no Schedule (ex.: DOCA) ↔ sala da planta: "Onde está agora" pode guardar um ou outro
   S.alias = {}; S.aliasInv = {};
@@ -1242,7 +1242,7 @@ function thumbReg(m, s) {
   const img = h('img', { alt: m.nome }); urlFoto(m.id).then(u => { if (u) img.src = u; });
   const marcas = [m.com ? '💬' : '', m.equip ? '🔧' : '', m.ponto ? '📍' : ''].join('');
   return h('figure', { class: 'reg', 'data-foto': m.id, title: 'Tocar para comentar, ligar a um equipamento ou marcar o ponto', onclick: () => editarFoto(m.id, s) },
-    img, h('figcaption', {}, `${m.id} ${marcas}`), m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null,
+    img, h('figcaption', {}, `${m.id} ${marcas}`), m.recebida ? h('div', { class: 'reg-rec', 'data-rec': m.id }, `📥 recebida${m.de ? ' de ' + m.de : ''}`) : null, m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null,
     btnApagar(m.id, () => { if (S.painel) renderPainel(); }));
 }
 // seção "Fotos da sala": câmera contínua (foto → foto → foto, sem sair da tela) e, como alternativa, a câmera/galeria do aparelho
@@ -1253,6 +1253,7 @@ function secFotos(s) {
     h('div', { class: 'fs-head' }, h('b', { id: 'nFotosSala' }, `📷 Fotos da sala${of !== s ? ' ' + codSala(of) : ''} (${l.length})`),
       h('button', { type: 'button', class: 'primary', id: 'btnFotografar', onclick: () => abrirCamera(s) }, '📷 Fotografar'),
       h('label', { class: 'btn mini' }, '🖼 Do aparelho', h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, name: 'foto', id: 'inFotoSala', onchange: aoEscolher })),
+      h('button', { type: 'button', class: 'mini', id: 'btnRecSala', title: 'Foto que chegou de outra pessoa (não conta como foto tirada na sala)', onclick: () => telaRecebidas({ tipo: 'sala', s }) }, '📥 Recebida'),
       h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, id: 'inFotoCap', onchange: aoEscolher })),
     l.length ? null : h('p', { class: 'sub' }, 'Sem fotos ainda. "Fotografar" abre a câmera e tira várias fotos seguidas; o comentário pode ficar para depois.'),
     h('div', { class: 'thumbs', id: 'thumbsSala' }, l.map(m => thumbReg(m, s))),
@@ -1395,7 +1396,7 @@ async function editarFoto(id, s) {
     await log('foto', id, 'registro', [novo.com, novo.equip, ponto ? `ponto ${ponto.join(',')}` : ''].filter(Boolean).join(' | '), { sala: f.sala_id });
     fecharModal(); toast(`${id} atualizada`);
   } },
-    h('h2', {}, `${id} · ${rotuloSala(s) || f.sala}`), h('p', { class: 'sub' }, `${fmtD(f.ts)} · origem: ${f.origem || 'app'} · ${f.nome}`), img,
+    h('h2', {}, `${id} · ${rotuloSala(s) || f.sala}`), h('p', { class: 'sub', id: 'fotoOrigem' }, f.recebida ? `Foto ${rotuloRecebida(f)} · ${f.nome}` : `${fmtD(f.ts)} · origem: ${f.origem || 'app'} · ${f.nome}`), img,
     h('div', { class: 'grid' },
       h('label', { class: 'full' }, 'Comentário (só se a foto não deixar claro)', h('textarea', { name: 'com', id: 'fotoCom', rows: 2, placeholder: DITAR }, f.com || '')),
       h('div', { class: 'fl full' }, 'Equipamento (opcional)',
@@ -1580,12 +1581,13 @@ async function ficha(it) {
       h('p', { class: 'sub' }, 'Exige o comentário (campo "Comentário" acima: onde procurou, quem confirmou) e pelo menos uma foto (abaixo). Conta como divergência no Resumo, no dashboard e na coluna Obs. da planilha.')),
     h('div', { class: 'fotos' }, h('b', {}, 'Fotos'), fotosBox,
       h('label', { class: 'btn' }, '📷 Tirar / escolher foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true, hidden: true, name: 'foto',
-        onchange: async ev => { for (const f of ev.target.files) { const fo = await addFoto(f, it); fotosBox.append(thumb(fo, true)); } ev.target.value = ''; } }))),
+        onchange: async ev => { for (const f of ev.target.files) { const fo = await addFoto(f, it); fotosBox.append(thumb(fo, true)); } ev.target.value = ''; } })),
+      h('button', { type: 'button', id: 'btnRecItem', title: 'Foto que chegou de outra pessoa', onclick: () => telaRecebidas({ tipo: 'item', it }) }, '📥 Foto recebida')),
     h('div', { class: 'acts' }, h('button', { type: 'button', onclick: fecharModal }, 'Cancelar'), h('button', { type: 'submit', class: 'primary' }, 'Salvar')));
   modal(form);
 }
 // miniatura de foto de item; apagar = true: com o botão "Apagar" (galeria da ficha)
-function thumb(f, apagar) { const u = URL.createObjectURL(f.blob); const fg = h('figure', { 'data-foto': f.id }, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id)); if (apagar) fg.append(btnApagar(f.id, () => fg.remove())); return fg; }
+function thumb(f, apagar) { const u = URL.createObjectURL(f.blob); const fg = h('figure', { 'data-foto': f.id }, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id), f.recebida ? h('div', { class: 'reg-rec', 'data-rec': f.id }, `📥 recebida${f.de ? ' de ' + f.de : ''}`) : null); if (apagar) fg.append(btnApagar(f.id, () => fg.remove())); return fg; }
 // Safari (iPad): versões que não aceitam a opção de orientação, ou não leem arquivo com createImageBitmap, usam um <img>
 async function bitmapDe(file) {
   if (window.createImageBitmap) {
@@ -1616,8 +1618,98 @@ async function addFoto(file, it, salaOverride, extra) {
   const f = { id, item: it ? it.id : null, sala, nome, blob, w, h: hh, ts: Date.now(), exportado: 0, orig: file.name || '', ...(extra || {}) };
   await DB.put('fotos', f);
   if (f.reg) { const { blob: _b, ...m } = f; if (!S.fotosSala.has(f.sala_id)) S.fotosSala.set(f.sala_id, []); S.fotosSala.get(f.sala_id).push(m); }
-  if (it) { const e = est(it.id); await setEstado(it.id, { fotos: [...e.fotos, id] }, 'foto', id); } else await log('foto', null, 'foto', id, { sala });
+  if (f.recebida) {
+    // v1.8.0 – foto recebida de terceiros: entra na lista de fotos do item / da sala, mas o evento é de um tipo à parte ("recebida"), que não
+    // conta como ação na sala (não abre nem estica janela) nem como atividade do dia. O estado do item não ganha data nova.
+    if (it) { const e = { ...est(it.id) }; e.fotos = [...e.fotos, id]; S.estado.set(it.id, e); await DB.put('estado', e); }
+    await log('recebida', it ? it.id : null, 'foto recebida', id, { sala, de: f.de || '', ...(f.prep ? { prep: f.prep } : {}) });
+  } else if (it) { const e = est(it.id); await setEstado(it.id, { fotos: [...e.fotos, id] }, 'foto', id); } else await log('foto', null, 'foto', id, { sala });
   return f;
+}
+
+// ---------- v1.8.0 – fotos recebidas de terceiros (WhatsApp, e-mail): escolhidas da galeria do aparelho ----------
+// Regra: a foto recebida NUNCA prova presença na sala. Entra marcada "recebida", com "de quem" (opcional) e a data original da foto quando
+// o arquivo traz (EXIF); senão vale a data em que foi anexada, dita como tal. A sala ou o item é o que se escolhe ao anexar – não se usa QR
+// nem horário para localizar. Sigilo: a foto é regravada pelo app (a mesma redução das outras), e a cópia regravada não leva GPS nem nenhum
+// outro dado do arquivo original. A mesma foto (mesmo conteúdo) não entra duas vezes.
+export function dataExif(buf) {   // data original (EXIF DateTimeOriginal; na falta, DateTime) em ms, hora local; 0 se o arquivo não traz
+  try {
+    const v = new DataView(buf); if (v.byteLength < 12 || v.getUint16(0) !== 0xFFD8) return 0;
+    let p = 2;
+    while (p + 4 <= v.byteLength) {
+      const m = v.getUint16(p), tam = v.getUint16(p + 2);
+      if (m === 0xFFE1 && v.getUint32(p + 4) === 0x45786966) {   // APP1 "Exif"
+        const t0 = p + 10, le = v.getUint16(t0) === 0x4949, u16 = o => v.getUint16(o, le), u32 = o => v.getUint32(o, le);
+        const txt = o => { let s = ''; for (let i = 0; i < 19; i++) s += String.fromCharCode(v.getUint8(o + i)); return s; };
+        const ifd = (o, tags) => { const n = u16(o), out = {}; for (let i = 0; i < n; i++) { const e = o + 2 + i * 12, t = u16(e); if (tags.includes(t)) out[t] = t === 0x8769 ? t0 + u32(e + 8) : t0 + u32(e + 8); } return out; };
+        const i0 = ifd(t0 + u32(t0 + 4), [0x8769, 0x0132]); const ex = i0[0x8769] ? ifd(i0[0x8769], [0x9003, 0x9004]) : {};
+        const onde = ex[0x9003] || ex[0x9004] || i0[0x0132]; if (!onde) return 0;
+        const r = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(txt(onde)); if (!r) return 0;
+        const d = new Date(+r[1], +r[2] - 1, +r[3], +r[4], +r[5], +r[6]).getTime(); return d > 0 && d <= Date.now() + 864e5 ? d : 0;
+      }
+      if ((m & 0xFF00) !== 0xFF00 || m === 0xFFDA) break;
+      p += 2 + tam;
+    }
+  } catch { }
+  return 0;
+}
+async function hashDe(buf) {   // identidade do conteúdo do arquivo recebido (para não entrar duas vezes)
+  if (window.crypto && crypto.subtle) { const d = await crypto.subtle.digest('SHA-1', buf); return [...new Uint8Array(d)].map(x => x.toString(16).padStart(2, '0')).join(''); }
+  const b = new Uint8Array(buf); let h1 = 0x811c9dc5, h2 = 0x1b873593; for (let i = 0; i < b.length; i++) { h1 = Math.imul(h1 ^ b[i], 16777619); h2 = Math.imul(h2 + b[i], 0x85ebca6b) ^ (h2 >>> 13); }
+  return `x${b.length}-${(h1 >>> 0).toString(16)}${(h2 >>> 0).toString(16)}`;
+}
+// alvo: { tipo: 'sala', s } | { tipo: 'item', it } | { tipo: 'prep', b }. Devolve { novas: [fotos], repetidas: n, erros: n }
+async function anexarRecebidas(files, alvo, de) {
+  podeRegistrar();
+  const r = { novas: [], repetidas: 0, erros: 0 }; const ja = new Set((await DB.all('fotos')).filter(f => f.hash && !f.desc).map(f => f.hash));
+  for (const file of files) {
+    try {
+      const buf = await file.arrayBuffer(), hash = await hashDe(buf);
+      if (ja.has(hash)) { r.repetidas++; continue; }
+      const extra = { origem: 'recebida', recebida: 1, de: (de || '').trim(), ts_orig: dataExif(buf), hash };
+      let fo;
+      if (alvo.tipo === 'sala') { const o = oficialDe(alvo.s);
+        fo = await addFoto(file, { id: 'SALA:' + o.id, tag: 'SALA' }, o.codigo && o.codigo !== '?' ? o.codigo : o.id, { sala_id: o.id, planta: o.planta || alvo.s.planta || S.planta, com: '', equip: '', ponto: null, reg: 1, ...extra }); }
+      else if (alvo.tipo === 'item') fo = await addFoto(file, alvo.it, null, extra);
+      else { fo = await addFoto(file, null, 'PREP', { prep: alvo.b.id, ...extra }); await setPrep(alvo.b, { fotos: [...prepFotos(S.meta.prep[alvo.b.id]), fo.id] }, 'foto recebida', fo.id); }
+      ja.add(hash); r.novas.push(fo);
+    } catch (x) { if (x && x.inativo) throw x; r.erros++; }
+  }
+  window.__RECEBIDAS__ = { novas: r.novas.map(f => f.id), repetidas: r.repetidas, erros: r.erros };
+  return r;
+}
+const rotuloRecebida = f => `recebida${f.de ? ' de ' + f.de : ''} · ${f.ts_orig ? 'foto de ' + fmtD(f.ts_orig) : 'anexada em ' + fmtD(f.ts) + ' (o arquivo não traz a data original)'}`;
+// janela "Anexar fotos recebidas": destino (se não veio escolhido), de quem, e as fotos da galeria (várias de uma vez)
+function telaRecebidas(alvo) {
+  const fixo = !!alvo; let tipo = alvo ? alvo.tipo : 'sala';
+  const salas = todasSalas().filter(s => s.tipo !== 'bloco' && s.tipo !== 'marca'), preps = prepItens();
+  const rotS = s => { const c = codSala(s), r = rotuloSala(s) || ''; return `${r.startsWith(c) ? r : c + (r ? ' · ' + r : '')} [${s.planta || ''}]`; }, rotI = i => `${i.id} · ${i.tag} · ${i.vol || ''}`;
+  const lista = h('datalist', { id: 'recLista' }), busca = h('input', { type: 'search', id: 'recDestino', list: 'recLista', placeholder: 'digite o código ou o nome…', autocomplete: 'off' });
+  const monta = () => { lista.innerHTML = ''; const ops = tipo === 'sala' ? salas.map(rotS) : tipo === 'item' ? S.itens.map(rotI) : preps.map(b => b.nome); for (const o of ops) lista.append(h('option', { value: o })); busca.value = ''; };
+  const acha = () => { const v = busca.value.trim(); if (!v) return null;
+    if (tipo === 'sala') { const s = salas.find(x => rotS(x) === v) || salas.find(x => codSala(x).toLowerCase() === v.toLowerCase()); return s ? { tipo, s } : null; }
+    if (tipo === 'item') { const it = S.itens.find(x => rotI(x) === v) || S.itens.find(x => String(x.id).toLowerCase() === v.toLowerCase()); return it ? { tipo, it } : null; }
+    const b = preps.find(x => x.nome === v); return b ? { tipo, b } : null; };
+  const de = h('input', { type: 'text', id: 'recDe', maxlength: 60, placeholder: 'de quem (opcional) – ex.: João, fornecedor', value: S.recDe || '' });
+  const res = h('p', { class: 'sub', id: 'recRes' }, 'Nenhuma foto anexada ainda.');
+  const onde = fixo ? h('p', { id: 'recAlvo' }, h('b', {}, 'Destino: '), alvo.tipo === 'sala' ? rotS(alvo.s) : alvo.tipo === 'item' ? rotI(alvo.it) : alvo.b.nome)
+    : h('div', { class: 'grid' },
+      h('label', {}, 'Anexar a', h('select', { id: 'recTipo', onchange: ev => { tipo = ev.target.value; monta(); } }, h('option', { value: 'sala' }, 'uma sala'), h('option', { value: 'item' }, 'um item (volume)'), h('option', { value: 'prep' }, 'Preparação do site'))),
+      h('label', { class: 'full' }, 'Qual', busca, lista));
+  const arq = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true, id: 'inRecebidas', onchange: async ev => {
+    const fs = [...ev.target.files]; ev.target.value = ''; if (!fs.length) return;
+    const dst = fixo ? alvo : acha(); if (!dst) { toast('Escolha o destino na lista antes de anexar'); return; }
+    S.recDe = de.value; res.textContent = `Anexando ${fs.length} foto(s)…`;
+    const r = await anexarRecebidas(fs, dst, de.value);
+    res.textContent = `${r.novas.length} foto(s) anexada(s) como "recebida"${de.value.trim() ? ' de ' + de.value.trim() : ''}` + (r.repetidas ? ` · ${r.repetidas} repetida(s) – já estava(m) no aparelho, não entrou de novo` : '') + (r.erros ? ` · ${r.erros} arquivo(s) que não é(são) imagem` : '')
+      + (r.novas.length ? ` · ${r.novas.filter(f => f.ts_orig).length} com a data original` : '');
+    render(); if (S.painel) renderPainel(); } });
+  if (!fixo) monta();
+  modal(h('div', { class: 'ficha', id: 'telaRecebidas' }, h('h2', {}, '📥 Anexar fotos recebidas'),
+    h('p', { class: 'sub' }, 'Para fotos que chegaram de outra pessoa (WhatsApp, e-mail). Ficam marcadas como "recebida": não contam como foto tirada na sala nem abrem janela de inspeção. A localização do arquivo original (GPS) não é guardada.'),
+    onde, h('div', { class: 'grid' }, h('label', { class: 'full' }, 'De quem', de)),
+    h('label', { class: 'btn primary big', id: 'btnRecEscolher' }, '🖼 Escolher fotos da galeria', arq), res,
+    h('div', { class: 'acts' }, h('button', { type: 'button', id: 'btnRecFechar', onclick: fecharModal }, 'Fechar'))));
 }
 
 // ---------- item novo ----------
@@ -1682,11 +1774,13 @@ function telaLista() {
 function situacaoEquip(its) {
   const at = ativos(its); const nd = its.filter(divEsc).length;
   if (!at.length) return nd ? 'Com divergência' : 'Fora do escopo';
-  if (at.every(i => proxima(i) === 5)) return 'Embarcado';
+  if (at.every(i => proxima(i) === 5)) return 'Embarcado';   // só com TODOS os volumes ativos embarcados (regra de saída)
   if (at.some(i => proxima(i) > 1)) return 'Em movimento';
   if (at.every(i => est(i.id).c[0])) return 'Conferido';
   return at.some(i => est(i.id).c[0]) ? 'Conferência parcial' : 'A conferir';
 }
+// v1.8.0 – regra de saída: "Parcial, 13 de 14" enquanto falta volume ativo embarcar; '' se ninguém embarcou ou se todos embarcaram
+function saidaParcial(its) { const at = ativos(its), n = at.filter(i => est(i.id).c[4]).length; return n && n < at.length ? `Parcial, ${n} de ${at.length} embarcados` : ''; }
 function barraEtapas(its) {  // 5 etapas: fração dos volumes ativos com a etapa feita ("Desceu" só conta para quem usa o elevador)
   const at = ativos(its);
   return h('span', { class: 'etbar' }, ETAPAS.map((nm, k) => {
@@ -1718,6 +1812,7 @@ function telaEquip() {
         h('span', { class: 'eq-id' }, h('b', {}, e.tag), h('span', { class: 'nm' }, ` ${e.nome || ''}`), h('small', {}, `${e.lote || ''}${e.porte ? ' · ' + e.porte : ''}`)),
         h('span', { class: 'eq-n' }, h('b', {}, `${conferidos(e.its)}/${at.length}`), h('small', {}, `conf. · ${e.its.length} vol.`)),
         barraEtapas(e.its),
+        saidaParcial(e.its) ? h('span', { class: 'tag-parcial', 'data-parcial': e.tag }, saidaParcial(e.its)) : null,
         e.nd ? h('span', { class: 'tag-div' }, `⚠ ${e.nd}`) : null,
         h('span', { class: 'eq-salas' }, e.loc.map(g => h('span', { class: 'chipsala' }, `${g.rot}${e.loc.length > 1 ? ' ×' + g.n : ''}`)))));
     }
@@ -1833,7 +1928,7 @@ function renderVista() {
       h('div', { class: 'sub', id: 'vistaSub' }, [eq.lote || (its[0] || {}).lote, eq.porte, `${its.length} volume${its.length === 1 ? '' : 's'}`, `${conferidos(its)}/${at.length} conferidos`,
         peso ? `peso total ${peso.toLocaleString('pt-BR')} kg${semPeso ? ` (${semPeso} sem peso)` : ''}` : null,
         eq.dia_caminhao ? `🚚 ${eq.dia_caminhao.split('-').reverse().join('/')}` : null, eq.book ? `book ${eq.book}` : null].filter(Boolean).join(' · ')),
-      h('div', { class: 'sub' }, barraEtapas(its), ` ${situacaoEquip(its)}`)),
+      h('div', { class: 'sub' }, barraEtapas(its), ` ${situacaoEquip(its)}`, saidaParcial(its) ? h('span', { class: 'tag-parcial', id: 'vistaParcial' }, saidaParcial(its)) : null)),
     h('div', { class: 'pact' },
       at.length ? h('button', { class: 'fora-btn', id: 'btnForaEquip', title: ESC().rotulo_fora, onclick: () => loteFora(tag, its) }, '⊘ Fora do escopo (equipamento inteiro)') : null,
       h('button', { class: 'x', onclick: fecharVista, 'aria-label': 'Fechar' }, '✕')));
@@ -1889,7 +1984,9 @@ function telaResumo() {
     h('p', {}, `Alterações desde o último fechamento: `, h('b', { id: 'pend' }, String(S.meta.pendentes || 0)), ` · último: ${S.meta.ultimoFechamento ? fmtD(S.meta.ultimoFechamento) : 'nunca'} · espaço: `, est_),
     h('div', { class: 'acts left' },
       h('button', { class: 'primary big', id: 'btnFechar', onclick: () => fecharDia(false, false, true) }, '⬇ Fechar o dia (pacote ZIP)'),
-      h('button', { id: 'btnCompartilhar', onclick: compartilhar }, S.ultPac && !S.ultPac.backup && !(S.meta.pendentes || 0) ? `📤 Compartilhar pacote (${S.ultPac.nome.replace(/^.*_(\d{8}-\d{4})\.zip$/, '$1')})` : '📤 Compartilhar pacote'),
+      // v1.7.1: onde o navegador não compartilha ZIP, o botão diz o que de fato faz (baixa o pacote de novo)
+      h('button', { id: 'btnCompartilhar', 'data-share': semShareZip() ? '0' : '1', onclick: compartilhar }, (semShareZip() ? '⬇ Baixar o pacote de novo' : '📤 Compartilhar pacote') + (S.ultPac && !S.ultPac.backup && !(S.meta.pendentes || 0) ? ` (${S.ultPac.nome.replace(/^.*_(\d{8}-\d{4})\.zip$/, '$1')})` : '')),
+      h('button', { id: 'btnRecebidas', onclick: () => telaRecebidas() }, '📥 Anexar fotos recebidas'),
       h('button', { id: 'btnBackup', onclick: () => fecharDia(true) }, 'Backup completo (todas as fotos)'),
       h('label', { class: 'btn' }, '↺ Restaurar backup', h('input', { type: 'file', id: 'inRestaurar', accept: ACEITA_PACOTE, hidden: true, onchange: async ev => {
         const f = ev.target.files[0]; ev.target.value = ''; if (!f) return; try { await restaurar(f); } catch (x) { alert(x.message); } } })),
@@ -1970,16 +2067,20 @@ async function entregarAparelho() {
       h('li', {}, h('b', {}, 'No outro aparelho'), ': com o mesmo pacote de dados carregado, Resumo → "↺ Restaurar backup" → escolher o BACKUP_… Ele passa a ser o aparelho ativo.')),
     etapa === 0 ? h('div', { class: 'grid' }, h('label', { class: 'full' }, 'Nome deste aparelho (vai nos pacotes)', nome)) : null,
     etapa === 2 ? h('p', { class: 'aviso-pos', id: 'entregaFim' }, `Este aparelho está INATIVO. ${S.ultPac ? `Envie o arquivo ${S.ultPac.nome} (pasta de downloads) ao outro aparelho.` : 'Envie o último BACKUP_… ao outro aparelho.'} Para voltar a usar este aparelho: "Restaurar backup" com o backup do outro.`) : null,
-    h('div', { class: 'acts' }, etapa === 2 && S.ultPac ? h('button', { type: 'button', id: 'btnEntregaShare', onclick: compartilharUltimo }, '📤 Compartilhar o backup') : null,
+    h('div', { class: 'acts' }, etapa === 2 && S.ultPac && !semShareZip() ? h('button', { type: 'button', id: 'btnEntregaShare', onclick: compartilharUltimo }, '📤 Compartilhar o backup') : null,
       h('button', { type: 'button', id: 'btnEntregaFechar', onclick: fecharModal }, etapa === 2 ? 'Fechar' : 'Cancelar'))));
   desenha();
 }
 // manda de novo o último arquivo gerado (aqui, o backup da entrega) para a folha de compartilhamento, sem fechar o dia outra vez
 async function compartilharUltimo() {
   const { zip, nome } = S.ultPac; const file = new File([zip], nome, { type: 'application/zip' });
-  if (!(navigator.canShare && navigator.canShare({ files: [file] }))) { baixar(zip, nome); toast('Este navegador não compartilha este tipo de arquivo – o backup foi baixado de novo'); return 'download'; }
+  const nao = semShare(file);
+  if (nao) { baixar(zip, nome); toast(`${SEM_SHARE_TXT[nao]} – o backup foi baixado de novo (pasta de downloads)`); return 'download'; }
   try { await navigator.share({ files: [file], title: nome }); toast('Backup entregue ao compartilhamento'); return 'share'; }
-  catch { toast('O compartilhamento não abriu – o backup está na pasta de downloads'); return 'pendente'; }
+  catch (x) {
+    if (x && x.name === 'AbortError') { toast('Compartilhamento cancelado – o backup está na pasta de downloads'); return 'pendente'; }
+    if (x && x.name === 'NotAllowedError') await guardarRecusa();   // v1.7.1: toque direto no botão e o navegador recusou
+    toast(`${SEM_SHARE_TXT.recusado} (${(x && x.name) || 'erro'}${x && x.message ? ': ' + x.message : ''}) – o backup está na pasta de downloads`); return 'pendente'; }
 }
 // "Manter minhas edições" (v1.3.2): a edição que NÃO mexeu na forma guardou uma cópia do contorno do pacote antigo. Antes de
 // trocar o pacote, essa cópia sai – a sala passa a usar o contorno do pacote novo e continua com código, nome e "revisada".
@@ -2179,23 +2280,55 @@ function avisoNadaNovo() {
 // v1.7.0 – envio do pacote do dia para a pasta compartilhada, pela folha de compartilhar do aparelho (o app não entra em conta nenhuma).
 // Estados do aviso de fechamento: tentando → share (entregue) | toque (o navegador só abre a folha com um toque novo: fica o botão grande)
 // | cancelado (a folha foi fechada sem enviar) | semshare (o navegador não compartilha arquivos: só o download).
-async function enviarPacote() {
+// v1.7.1 – falha de campo (celular Android, Chrome): o botão "Enviar para o Drive" piscava e nada abria. O navigator.canShare() dos
+// navegadores Chromium NÃO olha o tipo do arquivo (responde "pode" para qualquer um); quem recusa é o navigator.share(), com NotAllowedError
+// ("Permission denied"), porque esses navegadores só compartilham os tipos de uma lista fixa (imagem, áudio, vídeo, texto e PDF) e o ZIP
+// não está nela. A v1.7.0 lia esse erro como "falta um toque" e deixava o botão para sempre. Agora:
+//  - Chromium + arquivo fora da lista → estado "tipo": nem tenta, não mostra botão, mostra o caminho manual;
+//  - qualquer navegador que recuse o arquivo num toque direto no botão (ali não falta toque) → estado "recusado": diz o motivo na tela,
+//    tira o botão e guarda a recusa para este navegador (meta shareRecusado), para não oferecer de novo o que não funciona.
+// A extensão do arquivo não é trocada para passar pela lista: o pacote do dia é e continua sendo um ZIP.
+const SHARE_CHROMIUM = /\.(avif|bmp|css|csv|ehtml|flac|gif|html?|ico|jfif|jpe?g|m4a|m4v|mp3|mp4|mpeg|mpg|oga|ogg|ogm|ogv|opus|pdf|pjp|pjpeg|png|shtml?|svgz?|text|tiff?|txt|wav|weba|webm|webp|xbm)$/i;
+const SEM_SHARE_TXT = {
+  semshare: 'Este navegador não compartilha arquivos',
+  tipo: 'Este navegador não deixa compartilhar arquivo ZIP (só imagem, áudio, vídeo, texto e PDF)',
+  recusado: 'Este navegador recusou o compartilhamento do pacote' };
+// '' = dá para tentar a folha de compartilhar com este arquivo; senão, por que não dá (semshare | tipo | recusado)
+function semShare(file) {
+  if (!(navigator.share && navigator.canShare)) return 'semshare';
+  let pode = false; try { pode = navigator.canShare({ files: [file] }); } catch { }
+  if (!pode) return 'semshare';
+  if (/(Chrome|Chromium)\/\d/.test(navigator.userAgent) && !SHARE_CHROMIUM.test(file.name)) return 'tipo';
+  if (S.meta.shareRecusado && S.meta.shareRecusado === navigator.userAgent) return 'recusado';
+  return '';
+}
+const semShareZip = () => semShare(new File([], 'PACOTE.zip', { type: 'application/zip' }));
+const caminhoManual = nome => `O arquivo está em Downloads. Abra o Drive → + → Fazer upload → Downloads → ${nome}, dentro da pasta do projeto.`;
+async function guardarRecusa() { S.meta.shareRecusado = navigator.userAgent; await DB.put('meta', S.meta.shareRecusado, 'shareRecusado'); }
+// deToque = true quando vem direto do toque no botão (aí o navegador não pode alegar que falta um toque: recusa é recusa)
+async function enviarPacote(deToque) {
   if (!S.ultPac || S.ultPac.backup) return 'nada';
   const { zip, nome } = S.ultPac, file = new File([zip], nome, { type: 'application/zip' });
-  const marca = e => { if (S.avisoFech && S.avisoFech.nome === nome) { S.avisoFech.estado = e; if (S.view === 'resumo') render(); } window.__ENVIO__ = { estado: e, nome }; return e; };
-  if (!(navigator.canShare && navigator.canShare({ files: [file] }))) return marca('semshare');
+  const marca = (e, motivo) => { if (S.avisoFech && S.avisoFech.nome === nome) { S.avisoFech.estado = e; S.avisoFech.motivo = motivo || ''; if (S.view === 'resumo') render(); } window.__ENVIO__ = { estado: e, nome, motivo: motivo || '' }; return e; };
+  const nao = semShare(file); if (nao) return marca(nao);
   try { await navigator.share({ files: [file], title: nome }); toast('Pacote entregue ao compartilhamento'); return marca('share'); }
-  catch (x) { return marca(x && x.name === 'AbortError' ? 'cancelado' : 'toque'); }
+  catch (x) {
+    if (x && x.name === 'AbortError') return marca('cancelado');
+    const motivo = `${(x && x.name) || 'erro'}${x && x.message ? ': ' + x.message : ''}`;
+    if (deToque === true || !(x && x.name === 'NotAllowedError')) { if (x && x.name === 'NotAllowedError') await guardarRecusa(); return marca('recusado', motivo); }
+    return marca('toque', motivo);   // tentativa automática ao terminar o pacote: pode ser só o toque que já venceu – o botão tira a dúvida
+  }
 }
 function avisoFechamento() {
   const a = S.avisoFech; if (!a) return null;
-  const txt = { tentando: 'Abrindo o compartilhamento…', share: 'Pacote entregue ao compartilhamento.', toque: 'O navegador pede um toque para abrir o compartilhamento: toque em "Enviar para o Drive".',
-    cancelado: 'O compartilhamento foi fechado sem enviar. Para enviar, toque em "Enviar para o Drive".',
-    semshare: 'Este navegador não compartilha arquivos: o pacote foi baixado (pasta de downloads). Leve o arquivo para a pasta do projeto no Drive.' }[a.estado];
-  return h('div', { class: 'aviso-fech ' + a.estado, id: 'avisoFech', 'data-estado': a.estado },
+  const manual = a.estado in SEM_SHARE_TXT;   // sem folha de compartilhar para este arquivo: nada de botão, só o caminho à mão
+  const txt = manual ? `${SEM_SHARE_TXT[a.estado]}${a.estado === 'recusado' && a.motivo ? ` (${a.motivo})` : ''}. O pacote foi baixado: envie pelo app do Drive.`
+    : { tentando: 'Abrindo o compartilhamento…', share: 'Pacote entregue ao compartilhamento.', toque: 'O navegador pede um toque para abrir o compartilhamento: toque em "Enviar para o Drive".',
+      cancelado: 'O compartilhamento foi fechado sem enviar. Para enviar, toque em "Enviar para o Drive".' }[a.estado];
+  return h('div', { class: 'aviso-fech ' + a.estado + (manual ? ' manual' : ''), id: 'avisoFech', 'data-estado': a.estado },
     h('b', { id: 'avisoFechTit' }, `✔ Dia fechado – ${a.nome} (${a.mb} MB)`), h('p', { id: 'avisoFechTxt' }, txt),
-    a.estado === 'semshare' ? null : h('button', { type: 'button', class: 'primary big', id: 'btnEnviarDrive', onclick: enviarPacote }, a.estado === 'share' ? '📤 Enviar de novo' : '📤 Enviar para o Drive'),
-    h('p', { class: 'sub', id: 'dicaDrive' }, a.estado === 'semshare' ? 'O arquivo está na pasta de downloads deste aparelho.' : 'Na folha de compartilhar: Drive → "Salvar no Drive" → pasta do projeto. O arquivo também ficou na pasta de downloads.'),
+    manual ? null : h('button', { type: 'button', class: 'primary big', id: 'btnEnviarDrive', onclick: () => enviarPacote(true) }, a.estado === 'share' ? '📤 Enviar de novo' : '📤 Enviar para o Drive'),
+    h('p', { class: manual ? 'manual-drive' : 'sub', id: 'dicaDrive' }, manual ? caminhoManual(a.nome) : 'Na folha de compartilhar: Drive → "Salvar no Drive" → pasta do projeto. O arquivo também ficou na pasta de downloads.'),
     h('button', { type: 'button', id: 'btnAvisoFechX', onclick: () => { S.avisoFech = null; render(); } }, 'Dispensar'));
 }
 function baixar(zip, nome) { const a = h('a', { href: URL.createObjectURL(zip), download: nome }); document.body.append(a); a.click(); a.remove(); }
@@ -2209,15 +2342,18 @@ async function compartilhar() {
   }
   if (!S.ultPac) return 'nada';
   const { zip, nome } = S.ultPac; const file = new File([zip], nome, { type: 'application/zip' });
-  if (!(navigator.canShare && navigator.canShare({ files: [file] }))) {
+  const nao = semShare(file);
+  if (nao) {
     if (!novo) baixar(zip, nome);
-    toast('Este navegador não compartilha este tipo de arquivo – o pacote foi baixado (pasta de downloads)'); return 'download';
+    toast(`${SEM_SHARE_TXT[nao]} – o pacote foi baixado. ${caminhoManual(nome)}`); return 'download';
   }
   try { await navigator.share({ files: [file], title: nome }); toast('Pacote entregue ao compartilhamento'); return 'share'; }
   catch (x) {
+    // v1.7.1 – recusa num toque direto no botão: não é falta de toque; diz o motivo, guarda a recusa e o botão vira "Baixar"
+    if (x && x.name === 'NotAllowedError' && !novo) { await guardarRecusa(); render(); toast(`${SEM_SHARE_TXT.recusado} (${x.name}${x.message ? ': ' + x.message : ''}). ${caminhoManual(nome)}`); return 'recusado'; }
     // cancelado, ou o navegador recusou (pede um toque logo antes de abrir a folha, ou não aceita este tipo de arquivo): o pacote já foi baixado
     toast(x && x.name === 'AbortError' ? 'Compartilhamento cancelado – o pacote está na pasta de downloads'
-      : 'O compartilhamento não abriu – o pacote está na pasta de downloads; toque de novo em "Compartilhar pacote" para tentar outra vez');
+      : `O compartilhamento não abriu (${(x && x.name) || 'erro'}${x && x.message ? ': ' + x.message : ''}) – o pacote está na pasta de downloads; toque de novo em "Compartilhar pacote" para tentar outra vez`);
     return 'pendente';
   }
 }
@@ -2272,6 +2408,6 @@ function pedirConferente(motivo) {
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
 window.__APP__ = { toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
-  oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, enviarPacote, estadoBateria, prepFotos, unificarPrep, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
+  oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, enviarPacote, anexarRecebidas, telaRecebidas, dataExif, estadoBateria, prepFotos, unificarPrep, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();
