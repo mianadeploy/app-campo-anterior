@@ -365,3 +365,12 @@ label.chk.inteiro{display:block;background:#fff8d6;border:1px solid #e8d98a;bord
 /* ---------- v1.8.0 (ciclo 14): regra de saida (parcial) e foto recebida ---------- */
 .tag-parcial{display:inline-block;font-size:12px;font-weight:700;color:#8a4b00;background:#fff1d6;border:1px solid #f0a030;border-radius:6px;padding:1px 6px;margin-left:6px}
 .reg-rec{font-size:11px;font-weight:700;color:#5b2d8a;background:#f0e6fb;border-radius:4px;padding:1px 4px;margin-top:2px}
+
+/* v1.9.0 – nº de série (S/N): selo da verificação, bloco na vista do equipamento, lista "S/N a verificar" */
+.snv{display:inline-block;font-size:12px;font-weight:700;border-radius:6px;padding:1px 7px;border:1px solid #9aa3b2;color:#4a5568;background:#f3f5f8;white-space:nowrap}
+.snv.div{color:#fff;background:#c62828;border-color:#c62828}.snv.ok{color:#1b5e20;background:#e3f3e4;border-color:#2e7d32}.snv.av,.snv.sem{color:#8a4b00;background:#fff1d6;border-color:#f0a030}
+.sn-sec{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 10px;background:#fafbfd;display:flex;flex-direction:column;gap:8px}
+.sn-sec[data-sn=div]{border-color:#c62828;background:#fff5f5}.sn-l{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.sn-l #snDoc{word-break:break-all}
+.sn-l input[type=text]{flex:1 1 160px;min-width:0;font-size:16px;padding:8px;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,Consolas,monospace}
+.sn-av{margin:0;color:#c62828;font-weight:600;font-size:13px}.eq-sn{display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex:1 1 100%}.eq-sn small{color:#5b6472;word-break:break-all}
+.sn-row{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;text-align:left}.card.sn b{color:#8a4b00}

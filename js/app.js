@@ -4,7 +4,7 @@ import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
 import { KB_COLS, KB_CSS, kbModelo, kbHtml, kbPos } from './kanban.js';
 
-export const APP_VERSION = '1.8.0';
+export const APP_VERSION = '1.9.0';
 const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
@@ -26,7 +26,7 @@ const prepItens = () => { const b = prepBase(), ids = new Set(b.map(x => x.id)),
   return [...b, ...Object.values(S.meta.prep || {}).filter(p => p && p.novo && !p.removido && !ids.has(p.id) && !nomes.has(prepNorm(p.nome))).sort((a, c) => (a.criado || 0) - (c.criado || 0)).map(p => ({ id: p.id, nome: p.nome, novo: 1 }))]; };
 const S = { seed: null, itens: [], byId: new Map(), estado: new Map(), meta: {}, planta: 'L0', view: 'planta',
             zoom: { s: 1, x: 0, y: 0 }, painel: null, plantaUrls: {}, salasEd: [], edit: false, draw: null,
-            filtro: null, abertos: {}, det: false, detIt: new Set(), eqSel: null, fq: {}, alias: {}, aliasInv: {}, fotosSala: new Map(), thumbUrl: new Map(), ultPac: null };
+            filtro: null, abertos: {}, det: false, detIt: new Set(), eqSel: null, fq: {}, alias: {}, aliasInv: {}, fotosSala: new Map(), fotosPlaq: new Map(), thumbUrl: new Map(), ultPac: null };
 const $ = (sel, el = document) => el.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
@@ -357,10 +357,40 @@ async function setPrep(b, patch, campo, valor) {
   S.meta.prep = { ...S.meta.prep, [b.id]: p }; await DB.put('meta', S.meta.prep, 'prep');
   await log('prep', b.id, campo, valor);
 }
+// ---------- v1.9.0 – nº de série (S/N) por equipamento ----------
+// O pacote de dados traz, em cada equipamento, o S/N dos documentos como está na fonte (sn_doc) e o mesmo texto pronto para comparar
+// (sn_chaves: maiúsculas, só letras e algarismos; pode haver mais de um serial). No campo digita-se o que está na PLAQUETA e tira-se a foto
+// dela. O app compara ignorando maiúsculas, espaços, traços e outros sinais (zeros à esquerda contam) e diz "confere" ou "DIVERGE".
+// NUNCA corrige nada sozinho: guarda o que foi digitado, como foi digitado. Vai no pacote do dia (seriais.json) e no backup.
+const SN_TXT = { av: 'a verificar em campo', ok: 'confere', div: 'DIVERGE', sem: 'sem serial nos documentos – ler a plaqueta', seml: 'sem serial nos documentos – plaqueta lida' };
+export const snNorm = s => String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
+const eqDe = tag => ((S.seed && S.seed.equips) || []).find(e => e.tag === tag) || null;
+const snTem = () => ((S.seed && S.seed.equips) || []).some(e => 'sn_doc' in e);   // pacote de dados anterior ao S/N: nada é afirmado
+const snReg = tag => (S.meta.sn || {})[tag] || {};
+function snVerif(tag) {
+  const e = eqDe(tag); if (!e || !('sn_doc' in e)) return '';
+  const ch = e.sn_chaves || [], p = snNorm(snReg(tag).sn);
+  if (!ch.length) return p ? 'seml' : 'sem';
+  return !p ? 'av' : ch.includes(p) ? 'ok' : 'div';
+}
+const snPend = k => k === 'av' || k === 'div' || k === 'sem';
+const snBusca = tag => { const e = eqDe(tag) || {}; return `${e.sn_doc || ''} ${snReg(tag).sn || ''}`.toLowerCase(); };
+const snCasa = (tag, t) => { const b = snBusca(tag), n = t.replace(/[^0-9a-z]/g, ''); return !!b.trim() && (b.includes(t) || (n.length > 2 && b.replace(/[^0-9a-z]/g, '').includes(n))); };
+async function setSN(tag, valor) {
+  podeRegistrar();
+  const sn = String(valor || '').trim().slice(0, 80);
+  S.meta.sn = { ...(S.meta.sn || {}), [tag]: { ...snReg(tag), tag, sn, ts: Date.now(), por: S.meta.conferente || '' } }; await DB.put('meta', S.meta.sn, 'sn');
+  await log('sn', tag, 'S/N na plaqueta', sn, { ver: SN_TXT[snVerif(tag)] || '' });
+}
+// sala em que a foto da plaqueta é registrada: a sala aberta agora; senão, onde está a maior parte dos volumes do equipamento
+function salaDoEquip(tag) {
+  const a = idAtual(), sa = a ? salaPorId(a) : null, g = sa ? null : resumoLocais(itensDoEquip(tag))[0], s = sa || (g && g.s) || null, o = s ? oficialDe(s) : null;
+  return o ? (o.codigo && o.codigo !== '?' ? o.codigo : o.id) : ((itensDoEquip(tag)[0] || {}).sala || 'GERAL');
+}
 
 // ---------- carga ----------
 async function carregar() {
-  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {}; S._horas = null;   // o kanban relê as horas das etapas depois de carregar ou restaurar
+  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {}; S.meta.sn = (await DB.get('meta', 'sn')) || {}; S._horas = null;   // o kanban relê as horas das etapas depois de carregar ou restaurar
   const seed = await DB.get('meta', 'seed');
   if (!seed) return false;
   // pacote de dados antigo (v1.1) sem a ligação sala limpa → L2: a sala limpa passa a abrir pelo L2
@@ -393,8 +423,9 @@ async function carregar() {
 // ciclo 8: cada foto de sala é um registro (sala, hora, origem, comentário, equipamento, ponto na planta). As fotos de
 // "Notas / inspeção" de versões anteriores viram registros, sem perder nada. O índice em memória guarda só os metadados.
 async function indexarFotosSala() {
-  S.fotosSala = new Map();
+  S.fotosSala = new Map(); S.fotosPlaq = new Map();
   for (const f of await DB.all('fotos')) {
+    if (f.plaqueta && f.tag && !f.desc) { if (!S.fotosPlaq.has(f.tag)) S.fotosPlaq.set(f.tag, []); S.fotosPlaq.get(f.tag).push(f.id); }   // v1.9.0: fotos de plaqueta, por equipamento
     if (!String(f.item || '').startsWith('SALA:')) continue;
     if (!f.reg) { Object.assign(f, { sala_id: f.item.slice(5), origem: 'app', com: f.com || '', equip: f.equip || '', ponto: f.ponto || null, reg: 1, migrado: 'Notas / inspeção' }); await DB.put('fotos', f); }
     // v1.5.1: foto registrada numa marcação (até a v1.5.0) passa para a sala oficial; a marcação fica guardada. O nome do arquivo não muda.
@@ -1275,12 +1306,14 @@ async function apagarFoto(id) {
   const prepSem = async () => { const p = S.meta.prep[prepDono.id], fs = prepFotos(p).filter(x => x !== id); S.meta.prep = { ...S.meta.prep, [prepDono.id]: { ...p, fotos: fs, foto: fs[fs.length - 1] || '', ts: Date.now() } }; await DB.put('meta', S.meta.prep, 'prep'); };
   const prepCom = async () => { const p = S.meta.prep[prepDono.id], fs = [...new Set([...prepFotos(p), id])].sort(); S.meta.prep = { ...S.meta.prep, [prepDono.id]: { ...p, fotos: fs, foto: fs[fs.length - 1] || '', ts: Date.now() } }; await DB.put('meta', S.meta.prep, 'prep'); };
   const extra = { foto: id, nome: nomeFoto(f.nome), foto_ts: f.ts, sala: f.sala_id || f.sala || '', item: dono || '', por };
+  // v1.9.0: foto da plaqueta – sai da (ou volta à) lista de fotos de plaqueta do equipamento
+  const plaq = volta => { if (!f.plaqueta || !f.tag) return; const l = (S.fotosPlaq.get(f.tag) || []).filter(x => x !== id); if (volta) l.push(id); S.fotosPlaq.set(f.tag, l.sort()); };
   if (!f.exportado) {   // ainda não foi em pacote: apaga de vez
-    await DB.del('fotos', id); S.thumbUrl.delete(id); noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); });
+    await DB.del('fotos', id); S.thumbUrl.delete(id); noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) l.splice(i, 1); }); plaq(false);
     await tiraDoItem(); if (prepDono) await prepSem();
     await log('foto', id, 'foto apagada', extra.nome, { ...extra, antes_do_pacote: 1 });
     return async () => {
-      await DB.put('fotos', f); noIndice(l => { const { blob, ...m } = f; l.push(m); l.sort((a, b) => a.ts - b.ts); }); await poeNoItem();
+      await DB.put('fotos', f); noIndice(l => { const { blob, ...m } = f; l.push(m); l.sort((a, b) => a.ts - b.ts); }); await poeNoItem(); plaq(true);
       if (prepDono) await prepCom();
       await log('foto', id, 'foto restaurada', extra.nome, { ...extra, antes_do_pacote: 1 });
     };
@@ -1288,9 +1321,10 @@ async function apagarFoto(id) {
   const d = { ...f, desc: 1, desc_ts: ts, desc_por: por, ts_edit: ts }; await DB.put('fotos', d);
   noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) l[i] = { ...l[i], desc: 1, desc_ts: ts, desc_por: por }; }); await tiraDoItem();
   if (prepDono) await prepSem();   // v1.7.0: foto de item da Preparação do site que já foi em pacote – sai da grade do item
+  plaq(false);
   await log('foto', id, 'foto descartada', extra.nome, extra);
   return async () => {
-    const { desc, desc_ts, desc_por, ...v } = d; await DB.put('fotos', { ...v, ts_edit: Date.now() });
+    const { desc, desc_ts, desc_por, ...v } = d; await DB.put('fotos', { ...v, ts_edit: Date.now() }); plaq(true);
     noIndice(l => { const i = l.findIndex(x => x.id === id); if (i >= 0) { const { desc: _d, desc_ts: _t, desc_por: _p, ...m } = l[i]; l[i] = m; } }); await poeNoItem();
     if (prepDono) await prepCom();
     await log('foto', id, 'foto restaurada', extra.nome, extra);
@@ -1614,7 +1648,7 @@ async function addFoto(file, it, salaOverride, extra) {
   const sala = salaOverride || (it ? (so ? (so.codigo !== '?' ? so.codigo : so.id) : (o || it.sala)) : 'GERAL');
   const id = `FT-${String(seq).padStart(4, '0')}`;
   const deSala = it && String(it.id).startsWith('SALA:');
-  const nome = nomeArq(extra && extra.prep ? `${hoje()}_PREP_${slug(extra.prep)}_${id}.jpg` : deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
+  const nome = nomeArq(extra && extra.prep ? `${hoje()}_PREP_${slug(extra.prep)}_${id}.jpg` : extra && extra.plaqueta ? `${hoje()}_${slug(sala)}_PLAQUETA_${slug(extra.tag)}_${id}.jpg` : deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
   const f = { id, item: it ? it.id : null, sala, nome, blob, w, h: hh, ts: Date.now(), exportado: 0, orig: file.name || '', ...(extra || {}) };
   await DB.put('fotos', f);
   if (f.reg) { const { blob: _b, ...m } = f; if (!S.fotosSala.has(f.sala_id)) S.fotosSala.set(f.sala_id, []); S.fotosSala.get(f.sala_id).push(m); }
@@ -1623,7 +1657,11 @@ async function addFoto(file, it, salaOverride, extra) {
     // conta como ação na sala (não abre nem estica janela) nem como atividade do dia. O estado do item não ganha data nova.
     if (it) { const e = { ...est(it.id) }; e.fotos = [...e.fotos, id]; S.estado.set(it.id, e); await DB.put('estado', e); }
     await log('recebida', it ? it.id : null, 'foto recebida', id, { sala, de: f.de || '', ...(f.prep ? { prep: f.prep } : {}) });
-  } else if (it) { const e = est(it.id); await setEstado(it.id, { fotos: [...e.fotos, id] }, 'foto', id); } else await log('foto', null, 'foto', id, { sala });
+  } else if (it) { const e = est(it.id); await setEstado(it.id, { fotos: [...e.fotos, id] }, 'foto', id); }
+  else if (f.plaqueta) {   // v1.9.0 – foto da plaqueta: é do equipamento (tag), não de um volume nem da sala
+    if (!S.fotosPlaq.has(f.tag)) S.fotosPlaq.set(f.tag, []); S.fotosPlaq.get(f.tag).push(id);
+    await log('foto', null, 'foto da plaqueta', id, { sala, tag: f.tag });
+  } else await log('foto', null, 'foto', id, { sala });
   return f;
 }
 
@@ -1757,7 +1795,7 @@ function telaLista() {
     const t = S.q.trim().toLowerCase();
     const passa = i => S.fe == null ? true : S.fe === 'fora' ? foraEsc(i) : S.fe === 'div' ? divEsc(i) : S.fe === 'prev' ? prevista(i) && ativos([i]).length : S.fe === 'crp' ? crPend(i) : ativos([i]).length && proxima(i) === S.fe;
     let l = S.itens.filter(i => (!S.fs || i.sala === S.fs) && passa(i) &&
-      (!t || [i.id, i.tag, i.equip, i.vol, i.lote].some(v => String(v || '').toLowerCase().includes(t))));
+      (!t || [i.id, i.tag, i.equip, i.vol, i.lote].some(v => String(v || '').toLowerCase().includes(t)) || snCasa(i.tag, t)));   // v1.9.0: a busca aceita o nº de série do equipamento
     res.append(h('div', { class: 'sub', id: 'nres' }, `${l.length} itens`));
     for (const [tag, lst] of grupoPorEquip(l.slice(0, 400))) res.append(blocoEquip(tag, lst));
     if (S._rol) { $('#main').scrollTop = S._rol; S._rol = 0; }
@@ -1798,11 +1836,12 @@ function telaEquip() {
   const box = h('div', { class: 'lista equips' });
   const uniq = l => [...new Set(l.filter(Boolean))].sort();
   const sel = (id, k, rot, ops) => h('select', { id, onchange: ev => { f[k] = ev.target.value; go(); } }, h('option', { value: '' }, rot), ops.map(o => h('option', { value: o, selected: f[k] === o }, o)));
-  const q = h('input', { type: 'search', id: 'buscaEquip', placeholder: 'Buscar tag ou equipamento…', value: f.q || '', oninput: ev => { f.q = ev.target.value; go(); } });
+  const q = h('input', { type: 'search', id: 'buscaEquip', placeholder: 'Buscar tag, equipamento ou nº de série…', value: f.q || '', oninput: ev => { f.q = ev.target.value; go(); } });
   const res = h('div', { class: 'res', id: 'resEquip' });
   const go = () => {
     res.innerHTML = ''; const t = (f.q || '').trim().toLowerCase();
-    const l = eqs.filter(e => (!t || [e.tag, e.nome, e.lote].some(v => String(v || '').toLowerCase().includes(t))) && (!f.lote || e.lote === f.lote) && (!f.porte || e.porte === f.porte)
+    const l = eqs.filter(e => (!t || [e.tag, e.nome, e.lote].some(v => String(v || '').toLowerCase().includes(t)) || snCasa(e.tag, t)) && (!f.lote || e.lote === f.lote) && (!f.porte || e.porte === f.porte)
+      && (!f.sn || SN_TXT[snVerif(e.tag)] === f.sn)
       && (!f.sit || e.sit === f.sit || (f.sit === 'Com divergência' && e.nd)) && (!f.sala || e.loc.some(g => g.rot === f.sala)))
       .sort((a, b) => String(a.lote + a.tag).localeCompare(String(b.lote + b.tag)));
     res.append(h('div', { class: 'sub', id: 'nEquip' }, `${l.length} equipamento${l.length === 1 ? '' : 's'}`));
@@ -1814,13 +1853,15 @@ function telaEquip() {
         barraEtapas(e.its),
         saidaParcial(e.its) ? h('span', { class: 'tag-parcial', 'data-parcial': e.tag }, saidaParcial(e.its)) : null,
         e.nd ? h('span', { class: 'tag-div' }, `⚠ ${e.nd}`) : null,
+        snVerif(e.tag) ? h('span', { class: 'eq-sn', 'data-eqsn': e.tag }, h('small', {}, `S/N ${(eqDe(e.tag) || {}).sn_doc || 'não consta nos documentos'}`), h('span', { class: 'snv ' + snVerif(e.tag) }, SN_TXT[snVerif(e.tag)])) : null,
         h('span', { class: 'eq-salas' }, e.loc.map(g => h('span', { class: 'chipsala' }, `${g.rot}${e.loc.length > 1 ? ' ×' + g.n : ''}`)))));
     }
   };
   box.append(h('div', { class: 'filtros' }, q), h('div', { class: 'filtros sel' },
     sel('feLote', 'lote', 'Todos os lotes', uniq(eqs.map(e => e.lote))), sel('feSala', 'sala', 'Todas as salas', uniq(eqs.flatMap(e => e.loc.map(g => g.rot)))),
     sel('fePorte', 'porte', 'Todos os portes', uniq(eqs.map(e => e.porte))),
-    sel('feSit', 'sit', 'Todas as situações', ['A conferir', 'Conferência parcial', 'Conferido', 'Em movimento', 'Embarcado', 'Com divergência', 'Fora do escopo'])), res);
+    sel('feSit', 'sit', 'Todas as situações', ['A conferir', 'Conferência parcial', 'Conferido', 'Em movimento', 'Embarcado', 'Com divergência', 'Fora do escopo']),
+    snTem() ? sel('feSN', 'sn', 'S/N: todos', Object.values(SN_TXT)) : null), res);
   go();
   return box;
 }
@@ -1933,6 +1974,7 @@ function renderVista() {
       at.length ? h('button', { class: 'fora-btn', id: 'btnForaEquip', title: ESC().rotulo_fora, onclick: () => loteFora(tag, its) }, '⊘ Fora do escopo (equipamento inteiro)') : null,
       h('button', { class: 'x', onclick: fecharVista, 'aria-label': 'Fechar' }, '✕')));
   const body = h('div', { class: 'pbody' });
+  body.append(secSN(tag));
   body.append(h('p', { class: 'sub regra' }, sAqui ? `Você está em ${rotuloSala(sAqui)}: só os volumes desta sala podem ser marcados aqui. Os das outras salas aparecem para consulta.`
     : 'Conferência é presença física, sala a sala: os volumes aparecem para consulta. Abra a sala ("Ir para a sala") para marcar.'));
   for (const g of resumoLocais(its, aqui)) {
@@ -1950,6 +1992,52 @@ function renderVista() {
     body.append(sec);
   }
   v.append(head, body); v.classList.add('on'); body.scrollTop = rol;
+}
+// v1.9.0 – bloco do S/N na vista do equipamento: o dos documentos, o campo da plaqueta, a foto da plaqueta e o selo confere / DIVERGE
+function secSN(tag) {
+  const e = eqDe(tag);
+  if (!e || !('sn_doc' in e)) return h('section', { class: 'sn-sec', id: 'secSN', 'data-sn': '' }, h('b', {}, 'Nº de série (S/N)'), h('p', { class: 'sub' }, snTem() ? 'Este equipamento não está na lista de equipamentos do pacote de dados.' : 'O pacote de dados deste aparelho ainda não traz o nº de série dos documentos. Importe o pacote novo (Resumo → "Importar pacote de dados").'));
+  const k = snVerif(tag), r = snReg(tag);
+  const inp = h('input', { type: 'text', id: 'inSN', value: r.sn || '', placeholder: 'o que está na plaqueta', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', maxlength: 80 });
+  const gravar = async () => { const v = inp.value.trim(); if (v === (r.sn || '')) { toast('S/N da plaqueta sem mudança'); return; } await setSN(tag, v); refrescar(); const n = snVerif(tag); toast(v ? `S/N da plaqueta gravado – ${SN_TXT[n]}` : 'S/N da plaqueta apagado'); };
+  inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); gravar(); } });
+  const th = h('span', { class: 'prep-th', id: 'snFotos' });
+  for (const fid of (S.fotosPlaq.get(tag) || [])) DB.get('fotos', fid).then(fo => { if (!fo || fo.desc) return; const im = h('img', { alt: fid }); urlFoto(fid).then(u => { if (u) im.src = u; }); th.append(h('figure', { 'data-foto': fid }, im, btnApagar(fid, () => renderVista()))); });
+  const foto = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, id: 'inFotoSN', onchange: async ev => {
+    const fl = [...ev.target.files]; ev.target.value = ''; if (!fl.length) return;
+    for (const f1 of fl) await addFoto(f1, null, salaDoEquip(tag), { plaqueta: 1, tag });
+    renderVista(); toast('Foto da plaqueta guardada'); } });
+  return h('section', { class: 'sn-sec', id: 'secSN', 'data-sn': k },
+    h('div', { class: 'sn-l' }, h('b', {}, 'Nº de série (S/N)'), h('span', { class: 'snv ' + k, id: 'snVer' }, SN_TXT[k]),
+      r.sn ? h('small', { id: 'snQuando' }, `lido em ${fmtD(r.ts)}${r.por ? ' · ' + r.por : ''}`) : null),
+    h('div', { class: 'sn-l' }, h('span', {}, 'Nos documentos: '), h('b', { id: 'snDoc' }, e.sn_doc || 'não consta nos documentos'),
+      e.sn_tipo === 'varios' ? h('small', {}, ' (mais de um serial: confere se a plaqueta for um deles)') : null),
+    h('div', { class: 'sn-l' }, h('label', { for: 'inSN' }, 'Na plaqueta: '), inp, h('button', { type: 'button', class: 'primary mini', id: 'btnSN', onclick: gravar }, 'Gravar'),
+      h('label', { class: 'btn mini', id: 'btnFotoSN' }, `📷 Foto da plaqueta${(S.fotosPlaq.get(tag) || []).length ? ` (${S.fotosPlaq.get(tag).length})` : ''}`, foto)),
+    th,
+    k === 'div' ? h('p', { class: 'sn-av', id: 'snAviso' }, '⚠ A plaqueta não é igual ao serial dos documentos. O app não corrige nada: confira a digitação e a foto; a divergência vai para o escritório como está.') : null);
+}
+// v1.9.0 – "S/N a verificar": os equipamentos com a plaqueta por ler (ou que diverge), por sala onde estão – para percorrer no campo
+function listaSN() {
+  const out = new Map();
+  for (const e of listaEquips()) {
+    const k = snVerif(e.tag); if (!snPend(k) || !ativos(e.its).length) continue;
+    for (const g of e.loc) { if (!out.has(g.rot)) out.set(g.rot, { rot: g.rot, s: g.s, eqs: [] }); out.get(g.rot).eqs.push({ ...e, k, n: g.n }); }
+  }
+  return [...out.values()].sort((a, b) => a.rot.localeCompare(b.rot));
+}
+const nSN = () => (snTem() ? listaEquips().filter(e => snPend(snVerif(e.tag)) && ativos(e.its).length).length : 0);
+function telaSN() {
+  const l = listaSN(), n = nSN();
+  modal(h('div', { class: 'ficha', id: 'telaSN' }, h('h2', {}, `🔎 S/N a verificar (${n})`),
+    h('p', { class: 'sub' }, snTem() ? 'Equipamentos com a plaqueta ainda não lida, ou em que a plaqueta diverge dos documentos – por sala onde estão. Toque no equipamento para digitar o S/N da plaqueta e tirar a foto.'
+      : 'O pacote de dados deste aparelho ainda não traz o nº de série dos documentos. Importe o pacote novo (Resumo → "Importar pacote de dados").'),
+    l.map(g => h('section', { class: 'grupo-sala', 'data-snsala': g.rot }, h('div', { class: 'gs-head' }, h('b', {}, g.rot), h('span', { class: 'sub' }, ` ${g.eqs.length} equipamento${g.eqs.length === 1 ? '' : 's'}`)),
+      g.eqs.map(e => h('button', { type: 'button', class: 'eqrow sn-row', 'data-sneq': e.tag, onclick: () => { fecharModal(); setTimeout(() => abrirEquip(e.tag), 350); } },
+        h('span', { class: 'eq-id' }, h('b', {}, e.tag), h('span', { class: 'nm' }, ` ${e.nome || ''}`), h('small', {}, `${e.lote || ''} · documentos: ${(eqDe(e.tag) || {}).sn_doc || 'não consta'}`)),
+        h('span', { class: 'snv ' + e.k }, SN_TXT[e.k]))))),
+    !l.length && snTem() ? h('p', { class: 'vazio' }, 'Nenhum: todas as plaquetas lidas conferem.') : null,
+    h('div', { class: 'acts' }, h('button', { type: 'button', id: 'btnSNFechar', onclick: fecharModal }, 'Fechar'))));
 }
 // "Ir para a sala": fecha a vista e abre o painel da sala com o filtro do equipamento
 function irParaSala(s, q) {
@@ -1976,7 +2064,8 @@ function telaResumo() {
     h('div', { class: 'cards' }, PROX.map((p, k) => h('div', { class: 'card', 'data-k': k, onclick: () => { S.fe = k; nav('lista'); } }, h('b', {}, porEtapa[k]), h('span', {}, p))),
       h('div', { class: 'card div', 'data-k': 'div', onclick: () => { S.fe = 'div'; nav('lista'); } }, h('b', {}, nDiv), h('span', {}, 'Divergências')),
       h('div', { class: 'card fora', 'data-k': 'fora', onclick: () => { S.fe = 'fora'; nav('lista'); } }, h('b', {}, nFora), h('span', {}, 'Fora do escopo')),
-      h('div', { class: 'card crp', 'data-k': 'crp', onclick: () => { S.fe = 'crp'; nav('lista'); } }, h('b', {}, S.itens.filter(crPend).length), h('span', {}, 'Crating pendente'))),
+      h('div', { class: 'card crp', 'data-k': 'crp', onclick: () => { S.fe = 'crp'; nav('lista'); } }, h('b', {}, S.itens.filter(crPend).length), h('span', {}, 'Crating pendente')),
+      h('div', { class: 'card sn', 'data-k': 'sn', id: 'cardSN', onclick: telaSN }, h('b', {}, snTem() ? nSN() : '—'), h('span', {}, 'S/N a verificar'))),
     secPrep(),
     h('h3', {}, 'Por sala de origem'), tbl,
     h('h3', {}, 'Fechamento do dia'),
@@ -2142,6 +2231,8 @@ async function restaurar(file) {
   S.meta.novoSeq = Math.max(S.meta.novoSeq || 0, maxN(novos, /-(\d+)$/)); await DB.put('meta', S.meta.novoSeq, 'novoSeq');
   if (meta.conferente) await DB.put('meta', meta.conferente, 'conferente');
   if (Array.isArray(prep)) await DB.put('meta', Object.fromEntries(prep.filter(p => p && p.id).map(p => [p.id, p])), 'prep');  // backup anterior à v1.6.0 não traz a lista: fica a deste aparelho
+  const sns = td('seriais.json');   // v1.9.0: S/N lido na plaqueta; backup anterior à v1.9.0 não traz – fica o deste aparelho
+  if (Array.isArray(sns)) await DB.put('meta', Object.fromEntries(sns.filter(r => r && r.tag).map(({ ver, fotos, ...r }) => [r.tag, r])), 'sn');
   // quem restaura recebe o trabalho: este aparelho passa a ser o ativo
   S.meta.aparelho = { ...S.meta.aparelho, ativo: true, recebido: Date.now(), recebido_de: meta.aparelho || '' }; await DB.put('meta', S.meta.aparelho, 'aparelho'); S._regInativo = false;
   await DB.put('eventos', { ts: Date.now() - 1, tipo: 'sistema', id: null, campo: 'aparelho ativo', valor: `${S.meta.aparelho.nome}${meta.aparelho ? ' (recebeu de ' + meta.aparelho + ')' : ''}`, aparelho_id: S.meta.aparelho.id, exportado: 0 });
@@ -2185,6 +2276,9 @@ export async function montarPacote(completo, sel) {
   const ap = S.meta.aparelho || {}; Object.assign(meta, { aparelho: ap.nome || '', aparelho_id: ap.id || '', aparelho_ativo: ap.ativo !== false, ...(ap.entregue ? { aparelho_entregue: ap.entregue } : {}) });
   const prep = [...prepItens().map(b => ({ ...b, ...(S.meta.prep[b.id] || {}) })), ...Object.values(S.meta.prep).filter(p => !prepItens().some(b => b.id === p.id))].filter(p => p.ts);
   meta.n_prep = prep.length; meta.n_crated = estado.filter(e => e.cr === 'S').length;
+  // v1.9.0: S/N lido na plaqueta, por equipamento (sempre a lista inteira: vale o registro mais recente de cada tag)
+  const seriais = Object.values(S.meta.sn || {}).filter(r => r && r.tag && r.ts).map(r => ({ ...r, ver: SN_TXT[snVerif(r.tag)] || '', fotos: [...(S.fotosPlaq.get(r.tag) || [])] }));
+  meta.n_sn = seriais.filter(r => r.sn).length;
   // v1.6.2: fotos descartadas no aparelho depois de já terem ido em pacote (sempre a lista inteira: repetir não muda nada no escritório)
   const descartadas = (await DB.all('fotos')).filter(f => f.desc).map(f => ({ id: f.id, nome: nomeFoto(f.nome), ts: f.ts, desc_ts: f.desc_ts || 0, desc_por: f.desc_por || '', sala: f.sala_id || f.sala || '', item: f.item || '' }));
   meta.n_fotos_descartadas = descartadas.length;
@@ -2215,6 +2309,7 @@ ${foraL.length ? `<h3>${esc(ESC().rotulo_fora)} (${foraL.length})</h3><ul>${fora
     { name: 'vistorias.json', data: JSON.stringify(vist) },
     { name: 'fotos_sala.json', data: JSON.stringify(fotosSala) },
     { name: 'preparacao.json', data: JSON.stringify(prep) },
+    { name: 'seriais.json', data: JSON.stringify(seriais) },
     { name: 'fotos_descartadas.json', data: JSON.stringify(descartadas) },
     { name: 'fotos.json', data: JSON.stringify(fotos.map(({ blob, ...r }) => r)) },
     { name: 'resumo.html', data: resumo },
@@ -2407,7 +2502,7 @@ function pedirConferente(motivo) {
 }
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
-window.__APP__ = { toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
+window.__APP__ = { setSN, snVerif, snNorm, telaSN, SN_TXT, toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
   oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, enviarPacote, anexarRecebidas, telaRecebidas, dataExif, estadoBateria, prepFotos, unificarPrep, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();
