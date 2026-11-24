@@ -4,7 +4,7 @@ import { makeZip, readZip } from './zip.js';
 import { qrSvg } from './qr.js';
 import { KB_COLS, KB_CSS, kbModelo, kbHtml, kbPos } from './kanban.js';
 
-export const APP_VERSION = '1.9.0';
+export const APP_VERSION = '1.10.2';
 const DITAR = 'use o microfone do teclado para ditar';
 const ACEITA_PACOTE = '.zip,.json,application/zip,application/x-zip-compressed,application/json,application/octet-stream';
 const ETAPAS = ['Conferido', 'Preparado', 'Desceu', 'Na doca', 'Embarcado'];
@@ -146,6 +146,7 @@ async function migrarJanelaAntiga() {
 }
 function renderTopo() {
   const m = $('#btnMenu'); if (m) m.onclick = () => { if (S.seed) abrirMenu(); };
+  const d = $('#btnDiario'); if (d) { d.onclick = abrirDiario; d.hidden = !S.seed; }
 }
 // "Mostrar QR": a tela de abertura da janela desta sala; se a janela já fechou (2 min na planta, fechar o dia), abre outra
 async function mostrarQR(s) {
@@ -311,7 +312,10 @@ async function setEstado(id, patch, campo, valor) {
 async function toggleEtapa(it, k) {
   if (k === 2 && !it.elev) return;
   const c = [...est(it.id).c]; c[k] = c[k] ? 0 : 1;
-  await setEstado(it.id, { c }, ETAPAS[k], c[k]);
+  // v1.10.2 – "Conferido" já vale como "encontrado = Sim": quem marca Conferido não precisa abrir o volume para dizer que ele está ali. Só quando o
+  // campo está vazio (um "Não" ou "Parcial" já registrado fica) e o volume não tem divergência nem está fora do escopo. Desmarcar não apaga.
+  const e0 = est(it.id), achou = k === 0 && c[0] && !e0.enc && !e0.fora && !e0.diverg;
+  await setEstado(it.id, achou ? { c, enc: 'S' } : { c }, ETAPAS[k], c[k]);
   // regra do crated: antes de embarcar o item deveria estar crated ou "não se aplica" – o app avisa, não bloqueia
   if (k === 4 && c[4] && !est(it.id).cr) setTimeout(() => toast('⚠ Embarcado sem Crated – marque "Crated" ou "não se aplica"'), 50);
 }
@@ -362,7 +366,11 @@ async function setPrep(b, patch, campo, valor) {
 // (sn_chaves: maiúsculas, só letras e algarismos; pode haver mais de um serial). No campo digita-se o que está na PLAQUETA e tira-se a foto
 // dela. O app compara ignorando maiúsculas, espaços, traços e outros sinais (zeros à esquerda contam) e diz "confere" ou "DIVERGE".
 // NUNCA corrige nada sozinho: guarda o que foi digitado, como foi digitado. Vai no pacote do dia (seriais.json) e no backup.
-const SN_TXT = { av: 'a verificar em campo', ok: 'confere', div: 'DIVERGE', sem: 'sem serial nos documentos – ler a plaqueta', seml: 'sem serial nos documentos – plaqueta lida' };
+const SN_TXT = { av: 'a verificar em campo', ok: 'confere', div: 'DIVERGE', sem: 'sem serial nos documentos – ler a plaqueta', seml: 'sem serial nos documentos – plaqueta lida', nb: 'não bate com nenhum – conferir' };
+// v1.10.0: equipamento com VÁRIOS seriais nos documentos cuja plaqueta não é igual a nenhum deles não é "DIVERGE" (não se sabe qual módulo é qual):
+// o selo é "não bate com nenhum dos N – conferir". "DIVERGE" fica para quem tem um serial só.
+const snN = e => e.sn_n || Math.max(1, (e.sn_chaves || []).length - 1);
+const snTxt = (tag, k = snVerif(tag)) => (k === 'nb' ? `não bate com nenhum dos ${snN(eqDe(tag) || {})} – conferir` : SN_TXT[k] || '');
 export const snNorm = s => String(s || '').toUpperCase().replace(/[^0-9A-Z]/g, '');
 const eqDe = tag => ((S.seed && S.seed.equips) || []).find(e => e.tag === tag) || null;
 const snTem = () => ((S.seed && S.seed.equips) || []).some(e => 'sn_doc' in e);   // pacote de dados anterior ao S/N: nada é afirmado
@@ -371,16 +379,16 @@ function snVerif(tag) {
   const e = eqDe(tag); if (!e || !('sn_doc' in e)) return '';
   const ch = e.sn_chaves || [], p = snNorm(snReg(tag).sn);
   if (!ch.length) return p ? 'seml' : 'sem';
-  return !p ? 'av' : ch.includes(p) ? 'ok' : 'div';
+  return !p ? 'av' : ch.includes(p) ? 'ok' : e.sn_tipo === 'varios' ? 'nb' : 'div';
 }
-const snPend = k => k === 'av' || k === 'div' || k === 'sem';
+const snPend = k => k === 'av' || k === 'div' || k === 'sem' || k === 'nb';
 const snBusca = tag => { const e = eqDe(tag) || {}; return `${e.sn_doc || ''} ${snReg(tag).sn || ''}`.toLowerCase(); };
 const snCasa = (tag, t) => { const b = snBusca(tag), n = t.replace(/[^0-9a-z]/g, ''); return !!b.trim() && (b.includes(t) || (n.length > 2 && b.replace(/[^0-9a-z]/g, '').includes(n))); };
 async function setSN(tag, valor) {
   podeRegistrar();
   const sn = String(valor || '').trim().slice(0, 80);
   S.meta.sn = { ...(S.meta.sn || {}), [tag]: { ...snReg(tag), tag, sn, ts: Date.now(), por: S.meta.conferente || '' } }; await DB.put('meta', S.meta.sn, 'sn');
-  await log('sn', tag, 'S/N na plaqueta', sn, { ver: SN_TXT[snVerif(tag)] || '' });
+  await log('sn', tag, 'S/N na plaqueta', sn, { ver: snTxt(tag) });
 }
 // sala em que a foto da plaqueta é registrada: a sala aberta agora; senão, onde está a maior parte dos volumes do equipamento
 function salaDoEquip(tag) {
@@ -390,7 +398,7 @@ function salaDoEquip(tag) {
 
 // ---------- carga ----------
 async function carregar() {
-  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {}; S.meta.sn = (await DB.get('meta', 'sn')) || {}; S._horas = null;   // o kanban relê as horas das etapas depois de carregar ou restaurar
+  await carregarAparelho(); S.meta.prep = (await DB.get('meta', 'prep')) || {}; S.meta.sn = (await DB.get('meta', 'sn')) || {}; S.meta.diario = (await DB.get('meta', 'diario')) || {}; S._horas = null;   // o kanban relê as horas das etapas depois de carregar ou restaurar
   const seed = await DB.get('meta', 'seed');
   if (!seed) return false;
   // pacote de dados antigo (v1.1) sem a ligação sala limpa → L2: a sala limpa passa a abrir pelo L2
@@ -1142,6 +1150,7 @@ function renderPainel() {
         s.nota ? h('div', { class: 'nota' }, '📌 ' + s.nota) : null, nota.com ? h('div', { class: 'nota' }, '📝 ' + nota.com) : null,
         lemb.length ? h('div', { class: 'nota lembrete', id: 'lembreteSala' }, `⚡ Nesta sala: ${lemb.map(l => l.rot).join(' · ')} – fotografar`) : null)),
     h('div', { class: 'pact' },
+      h('button', { class: 'bt-diario', 'data-diario': '1', title: 'Diário de hoje', 'aria-label': 'Diário de hoje', onclick: abrirDiario }, '📓'),
       h('button', { id: 'btnAbertura', class: 'primary qr-btn', title: 'Mostrar de novo a tela de abertura (QR) desta entrada na sala, para o fotógrafo', onclick: () => mostrarQR(s) }, '📺 Mostrar QR'),
       h('button', { id: 'btnDetalhes', class: S.det ? 'on' : '', 'aria-pressed': String(!!S.det), title: 'Mostrar peso e dimensões de todos os itens', onclick: () => { S.det = !S.det; S.detIt.clear(); renderPainel(); } }, S.det ? 'Detalhes: ligados' : 'Detalhes'),
       h('button', { id: 'btnNotasSala', onclick: () => notasSala(s) }, '📝 Notas / inspeção'),
@@ -1274,7 +1283,7 @@ function thumbReg(m, s) {
   const marcas = [m.com ? '💬' : '', m.equip ? '🔧' : '', m.ponto ? '📍' : ''].join('');
   return h('figure', { class: 'reg', 'data-foto': m.id, title: 'Tocar para comentar, ligar a um equipamento ou marcar o ponto', onclick: () => editarFoto(m.id, s) },
     img, h('figcaption', {}, `${m.id} ${marcas}`), m.recebida ? h('div', { class: 'reg-rec', 'data-rec': m.id }, `📥 recebida${m.de ? ' de ' + m.de : ''}`) : null, m.marcacao ? h('div', { class: 'reg-marc' }, m.marcacao) : null, m.com ? h('div', { class: 'reg-com' }, m.com) : null, m.equip ? h('div', { class: 'reg-eq' }, m.equip) : null,
-    btnApagar(m.id, () => { if (S.painel) renderPainel(); }));
+    acoesFoto(m.id, () => { if (S.painel) renderPainel(); }));
 }
 // seção "Fotos da sala": câmera contínua (foto → foto → foto, sem sair da tela) e, como alternativa, a câmera/galeria do aparelho
 function secFotos(s) {
@@ -1525,7 +1534,7 @@ function linhaItem(it, consulta = false) {
 async function conferirTodos(lst) {
   podeRegistrar();
   lst = ativos(lst);
-  for (const it of lst) { const c = [...est(it.id).c]; if (!c[0]) { c[0] = 1; const e = { ...est(it.id), c, ts: Date.now() }; S.estado.set(it.id, e); await DB.put('estado', e); } }
+  for (const it of lst) { const c = [...est(it.id).c]; if (!c[0]) { c[0] = 1; const e = { ...est(it.id), c, ...(est(it.id).enc ? {} : { enc: 'S' }), ts: Date.now() }; S.estado.set(it.id, e); await DB.put('estado', e); } }
   await log('lote', lst[0].tag, 'Conferido (todos)', lst.length);
   refrescar(); toast(`${lst.length} itens conferidos`);
 }
@@ -1621,7 +1630,7 @@ async function ficha(it) {
   modal(form);
 }
 // miniatura de foto de item; apagar = true: com o botão "Apagar" (galeria da ficha)
-function thumb(f, apagar) { const u = URL.createObjectURL(f.blob); const fg = h('figure', { 'data-foto': f.id }, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id), f.recebida ? h('div', { class: 'reg-rec', 'data-rec': f.id }, `📥 recebida${f.de ? ' de ' + f.de : ''}`) : null); if (apagar) fg.append(btnApagar(f.id, () => fg.remove())); return fg; }
+function thumb(f, apagar) { const u = URL.createObjectURL(f.blob); const fg = h('figure', { 'data-foto': f.id }, h('img', { src: u, alt: f.nome }), h('figcaption', {}, f.id), f.recebida ? h('div', { class: 'reg-rec', 'data-rec': f.id }, `📥 recebida${f.de ? ' de ' + f.de : ''}`) : null); if (apagar) fg.append(acoesFoto(f.id, () => fg.remove())); return fg; }
 // Safari (iPad): versões que não aceitam a opção de orientação, ou não leem arquivo com createImageBitmap, usam um <img>
 async function bitmapDe(file) {
   if (window.createImageBitmap) {
@@ -1648,7 +1657,7 @@ async function addFoto(file, it, salaOverride, extra) {
   const sala = salaOverride || (it ? (so ? (so.codigo !== '?' ? so.codigo : so.id) : (o || it.sala)) : 'GERAL');
   const id = `FT-${String(seq).padStart(4, '0')}`;
   const deSala = it && String(it.id).startsWith('SALA:');
-  const nome = nomeArq(extra && extra.prep ? `${hoje()}_PREP_${slug(extra.prep)}_${id}.jpg` : extra && extra.plaqueta ? `${hoje()}_${slug(sala)}_PLAQUETA_${slug(extra.tag)}_${id}.jpg` : deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
+  const nome = nomeArq(extra && extra.diario ? `${hoje()}_DIARIO_${id}.jpg` : extra && extra.prep ? `${hoje()}_PREP_${slug(extra.prep)}_${id}.jpg` : extra && extra.plaqueta ? `${hoje()}_${slug(sala)}_PLAQUETA_${slug(extra.tag)}_${id}.jpg` : deSala ? `${hoje()}_${slug(sala)}_SALA_${id}.jpg` : `${hoje()}_${slug(sala)}_${it ? it.id : 'SEMITEM'}_${it ? slug(it.tag) : 'GERAL'}_${id}.jpg`);
   const f = { id, item: it ? it.id : null, sala, nome, blob, w, h: hh, ts: Date.now(), exportado: 0, orig: file.name || '', ...(extra || {}) };
   await DB.put('fotos', f);
   if (f.reg) { const { blob: _b, ...m } = f; if (!S.fotosSala.has(f.sala_id)) S.fotosSala.set(f.sala_id, []); S.fotosSala.get(f.sala_id).push(m); }
@@ -1658,6 +1667,7 @@ async function addFoto(file, it, salaOverride, extra) {
     if (it) { const e = { ...est(it.id) }; e.fotos = [...e.fotos, id]; S.estado.set(it.id, e); await DB.put('estado', e); }
     await log('recebida', it ? it.id : null, 'foto recebida', id, { sala, de: f.de || '', ...(f.prep ? { prep: f.prep } : {}) });
   } else if (it) { const e = est(it.id); await setEstado(it.id, { fotos: [...e.fotos, id] }, 'foto', id); }
+  else if (f.diario) await log('diario', f.diario, 'foto', id, { k: 'fato' });   // v1.10.0 – foto de um fato do Diário: não é ação em sala nenhuma
   else if (f.plaqueta) {   // v1.9.0 – foto da plaqueta: é do equipamento (tag), não de um volume nem da sala
     if (!S.fotosPlaq.has(f.tag)) S.fotosPlaq.set(f.tag, []); S.fotosPlaq.get(f.tag).push(id);
     await log('foto', null, 'foto da plaqueta', id, { sala, tag: f.tag });
@@ -1853,7 +1863,7 @@ function telaEquip() {
         barraEtapas(e.its),
         saidaParcial(e.its) ? h('span', { class: 'tag-parcial', 'data-parcial': e.tag }, saidaParcial(e.its)) : null,
         e.nd ? h('span', { class: 'tag-div' }, `⚠ ${e.nd}`) : null,
-        snVerif(e.tag) ? h('span', { class: 'eq-sn', 'data-eqsn': e.tag }, h('small', {}, `S/N ${(eqDe(e.tag) || {}).sn_doc || 'não consta nos documentos'}`), h('span', { class: 'snv ' + snVerif(e.tag) }, SN_TXT[snVerif(e.tag)])) : null,
+        snVerif(e.tag) ? h('span', { class: 'eq-sn', 'data-eqsn': e.tag }, h('small', {}, `S/N ${(eqDe(e.tag) || {}).sn_doc || 'não consta nos documentos'}`), h('span', { class: 'snv ' + snVerif(e.tag) }, snTxt(e.tag))) : null,
         h('span', { class: 'eq-salas' }, e.loc.map(g => h('span', { class: 'chipsala' }, `${g.rot}${e.loc.length > 1 ? ' ×' + g.n : ''}`)))));
     }
   };
@@ -1971,6 +1981,7 @@ function renderVista() {
         eq.dia_caminhao ? `🚚 ${eq.dia_caminhao.split('-').reverse().join('/')}` : null, eq.book ? `book ${eq.book}` : null].filter(Boolean).join(' · ')),
       h('div', { class: 'sub' }, barraEtapas(its), ` ${situacaoEquip(its)}`, saidaParcial(its) ? h('span', { class: 'tag-parcial', id: 'vistaParcial' }, saidaParcial(its)) : null)),
     h('div', { class: 'pact' },
+      h('button', { class: 'bt-diario', 'data-diario': '1', title: 'Diário de hoje', 'aria-label': 'Diário de hoje', onclick: abrirDiario }, '📓'),
       at.length ? h('button', { class: 'fora-btn', id: 'btnForaEquip', title: ESC().rotulo_fora, onclick: () => loteFora(tag, its) }, '⊘ Fora do escopo (equipamento inteiro)') : null,
       h('button', { class: 'x', onclick: fecharVista, 'aria-label': 'Fechar' }, '✕')));
   const body = h('div', { class: 'pbody' });
@@ -1999,22 +2010,23 @@ function secSN(tag) {
   if (!e || !('sn_doc' in e)) return h('section', { class: 'sn-sec', id: 'secSN', 'data-sn': '' }, h('b', {}, 'Nº de série (S/N)'), h('p', { class: 'sub' }, snTem() ? 'Este equipamento não está na lista de equipamentos do pacote de dados.' : 'O pacote de dados deste aparelho ainda não traz o nº de série dos documentos. Importe o pacote novo (Resumo → "Importar pacote de dados").'));
   const k = snVerif(tag), r = snReg(tag);
   const inp = h('input', { type: 'text', id: 'inSN', value: r.sn || '', placeholder: 'o que está na plaqueta', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', maxlength: 80 });
-  const gravar = async () => { const v = inp.value.trim(); if (v === (r.sn || '')) { toast('S/N da plaqueta sem mudança'); return; } await setSN(tag, v); refrescar(); const n = snVerif(tag); toast(v ? `S/N da plaqueta gravado – ${SN_TXT[n]}` : 'S/N da plaqueta apagado'); };
+  const gravar = async () => { const v = inp.value.trim(); if (v === (r.sn || '')) { toast('S/N da plaqueta sem mudança'); return; } await setSN(tag, v); refrescar(); const n = snVerif(tag); toast(v ? `S/N da plaqueta gravado – ${snTxt(tag, n)}` : 'S/N da plaqueta apagado'); };
   inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); gravar(); } });
   const th = h('span', { class: 'prep-th', id: 'snFotos' });
-  for (const fid of (S.fotosPlaq.get(tag) || [])) DB.get('fotos', fid).then(fo => { if (!fo || fo.desc) return; const im = h('img', { alt: fid }); urlFoto(fid).then(u => { if (u) im.src = u; }); th.append(h('figure', { 'data-foto': fid }, im, btnApagar(fid, () => renderVista()))); });
+  for (const fid of (S.fotosPlaq.get(tag) || [])) DB.get('fotos', fid).then(fo => { if (!fo || fo.desc) return; const im = h('img', { alt: fid }); urlFoto(fid).then(u => { if (u) im.src = u; }); th.append(h('figure', { 'data-foto': fid }, im, acoesFoto(fid, () => renderVista()))); });
   const foto = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, id: 'inFotoSN', onchange: async ev => {
     const fl = [...ev.target.files]; ev.target.value = ''; if (!fl.length) return;
     for (const f1 of fl) await addFoto(f1, null, salaDoEquip(tag), { plaqueta: 1, tag });
     renderVista(); toast('Foto da plaqueta guardada'); } });
   return h('section', { class: 'sn-sec', id: 'secSN', 'data-sn': k },
-    h('div', { class: 'sn-l' }, h('b', {}, 'Nº de série (S/N)'), h('span', { class: 'snv ' + k, id: 'snVer' }, SN_TXT[k]),
+    h('div', { class: 'sn-l' }, h('b', {}, 'Nº de série (S/N)'), h('span', { class: 'snv ' + k, id: 'snVer' }, snTxt(tag, k)),
       r.sn ? h('small', { id: 'snQuando' }, `lido em ${fmtD(r.ts)}${r.por ? ' · ' + r.por : ''}`) : null),
     h('div', { class: 'sn-l' }, h('span', {}, 'Nos documentos: '), h('b', { id: 'snDoc' }, e.sn_doc || 'não consta nos documentos'),
       e.sn_tipo === 'varios' ? h('small', {}, ' (mais de um serial: confere se a plaqueta for um deles)') : null),
     h('div', { class: 'sn-l' }, h('label', { for: 'inSN' }, 'Na plaqueta: '), inp, h('button', { type: 'button', class: 'primary mini', id: 'btnSN', onclick: gravar }, 'Gravar'),
       h('label', { class: 'btn mini', id: 'btnFotoSN' }, `📷 Foto da plaqueta${(S.fotosPlaq.get(tag) || []).length ? ` (${S.fotosPlaq.get(tag).length})` : ''}`, foto)),
     th,
+    k === 'nb' ? h('p', { class: 'sn-av', id: 'snAviso' }, '⚠ Os documentos trazem mais de um serial para este equipamento e a plaqueta não é igual a nenhum deles. Não é divergência ainda: confira a digitação, a foto e de qual módulo é a plaqueta.') : null,
     k === 'div' ? h('p', { class: 'sn-av', id: 'snAviso' }, '⚠ A plaqueta não é igual ao serial dos documentos. O app não corrige nada: confira a digitação e a foto; a divergência vai para o escritório como está.') : null);
 }
 // v1.9.0 – "S/N a verificar": os equipamentos com a plaqueta por ler (ou que diverge), por sala onde estão – para percorrer no campo
@@ -2035,7 +2047,7 @@ function telaSN() {
     l.map(g => h('section', { class: 'grupo-sala', 'data-snsala': g.rot }, h('div', { class: 'gs-head' }, h('b', {}, g.rot), h('span', { class: 'sub' }, ` ${g.eqs.length} equipamento${g.eqs.length === 1 ? '' : 's'}`)),
       g.eqs.map(e => h('button', { type: 'button', class: 'eqrow sn-row', 'data-sneq': e.tag, onclick: () => { fecharModal(); setTimeout(() => abrirEquip(e.tag), 350); } },
         h('span', { class: 'eq-id' }, h('b', {}, e.tag), h('span', { class: 'nm' }, ` ${e.nome || ''}`), h('small', {}, `${e.lote || ''} · documentos: ${(eqDe(e.tag) || {}).sn_doc || 'não consta'}`)),
-        h('span', { class: 'snv ' + e.k }, SN_TXT[e.k]))))),
+        h('span', { class: 'snv ' + e.k }, snTxt(e.tag, e.k)))))),
     !l.length && snTem() ? h('p', { class: 'vazio' }, 'Nenhum: todas as plaquetas lidas conferem.') : null,
     h('div', { class: 'acts' }, h('button', { type: 'button', id: 'btnSNFechar', onclick: fecharModal }, 'Fechar'))));
 }
@@ -2066,7 +2078,7 @@ function telaResumo() {
       h('div', { class: 'card fora', 'data-k': 'fora', onclick: () => { S.fe = 'fora'; nav('lista'); } }, h('b', {}, nFora), h('span', {}, 'Fora do escopo')),
       h('div', { class: 'card crp', 'data-k': 'crp', onclick: () => { S.fe = 'crp'; nav('lista'); } }, h('b', {}, S.itens.filter(crPend).length), h('span', {}, 'Crating pendente')),
       h('div', { class: 'card sn', 'data-k': 'sn', id: 'cardSN', onclick: telaSN }, h('b', {}, snTem() ? nSN() : '—'), h('span', {}, 'S/N a verificar'))),
-    secPrep(),
+    cartaoDiario(),
     h('h3', {}, 'Por sala de origem'), tbl,
     h('h3', {}, 'Fechamento do dia'),
     avisoFechamento(),
@@ -2098,16 +2110,19 @@ function telaResumo() {
   return box;
 }
 const isoDia = () => isoLocal(Date.now()).slice(0, 10);
-function secPrep() {
-  const sec = h('section', { class: 'prep', id: 'prepSite' }, h('h3', {}, 'Preparação do site'),
+// v1.10.2 – a lista saiu do Resumo e é uma seção do Diário (logo depois dos fatos do dia). Os dados não mudaram de lugar: continua em meta.prep,
+// no pacote do dia (preparacao.json), no painel e na base. Com 4 ou mais itens feitos, os feitos ficam recolhidos ("N feitos – ver").
+function secPrep(redesenha = render) {
+  const sec = h('section', { class: 'prep di-sec', id: 'prepSite' }, h('h3', {}, `Preparação do site (${prepItens().filter(b => (S.meta.prep[b.id] || {}).feito).length} de ${prepItens().length} feitos)`),
     h('p', { class: 'sub' }, 'Prontidão do site para o move-out. Cada item: feito / não feito, data, comentário e fotos (opcionais; quantas quiser). Vai no pacote do dia.'));
+  const feitos = [], abertos = [];
   for (const b of prepItens()) {
     const p = S.meta.prep[b.id] || {};
     const fs = prepFotos(p), th = h('span', { class: 'prep-th', 'data-prepn': fs.length });   // v1.7.0: várias fotos por item, em grade; cada uma com "Apagar"
-    for (const fid of fs) { const im = h('img', { alt: fid }), fg = h('figure', { 'data-foto': fid }, im, btnApagar(fid, render)); urlFoto(fid).then(u => { if (u) im.src = u; }); th.append(fg); }
-    sec.append(h('div', { class: 'prep-item' + (p.feito ? ' ok' : ''), 'data-prep': b.id },
+    for (const fid of fs) { const im = h('img', { alt: fid }), fg = h('figure', { 'data-foto': fid }, im, acoesFoto(fid, redesenha)); urlFoto(fid).then(u => { if (u) im.src = u; }); th.append(fg); }
+    (p.feito ? feitos : abertos).push(h('div', { class: 'prep-item' + (p.feito ? ' ok' : ''), 'data-prep': b.id },
       h('button', { class: 'prep-bt' + (p.feito ? ' on' : ''), 'data-prepbt': b.id, 'aria-pressed': String(!!p.feito),
-        onclick: async () => { await setPrep(b, { feito: p.feito ? 0 : 1, data: p.data || (p.feito ? '' : isoDia()) }, 'feito', p.feito ? 0 : 1); render(); } }, p.feito ? '✔ Feito' : '○ Não feito'),
+        onclick: async () => { await setPrep(b, { feito: p.feito ? 0 : 1, data: p.data || (p.feito ? '' : isoDia()) }, 'feito', p.feito ? 0 : 1); redesenha(); } }, p.feito ? '✔ Feito' : '○ Não feito'),
       h('b', { class: 'prep-nome' }, b.nome),
       h('div', { class: 'pi-campos' },
         h('label', {}, 'Data ', h('input', { type: 'date', 'data-prepdata': b.id, value: p.data || '', onchange: async ev => { await setPrep(b, { data: ev.target.value }, 'data', ev.target.value); } })),
@@ -2115,17 +2130,19 @@ function secPrep() {
         h('label', { class: 'btn mini' }, fs.length ? `📷 + Foto (${fs.length})` : '📷 Foto', h('input', { type: 'file', accept: 'image/*', capture: 'environment', multiple: true, hidden: true, 'data-prepfoto': b.id,
           onchange: async ev => { const fl = [...ev.target.files]; ev.target.value = ''; if (!fl.length) return;
             for (const f1 of fl) { const fo = await addFoto(f1, null, 'PREP', { prep: b.id }); await setPrep(b, { fotos: [...prepFotos(S.meta.prep[b.id]), fo.id] }, 'foto', fo.id); }
-            render(); } })), th,
+            redesenha(); } })), th,
         b.novo ? h('button', { type: 'button', class: 'mini', 'data-prepdel': b.id, title: 'Tirar este item da lista (ele foi acrescentado neste aparelho)',
-          onclick: async () => { if (!confirm(`Tirar "${b.nome}" da lista Preparação do site?`)) return; await setPrep(b, { removido: 1 }, 'item removido', b.nome); render(); } }, '✕ tirar') : null)));
+          onclick: async () => { if (!confirm(`Tirar "${b.nome}" da lista Preparação do site?`)) return; await setPrep(b, { removido: 1 }, 'item removido', b.nome); redesenha(); } }, '✕ tirar') : null)));
   }
+  if (feitos.length >= 4) sec.append(...abertos, h('details', { class: 'prep-feitos', id: 'prepFeitos', open: !!S.prepAb, ontoggle: ev => { S.prepAb = ev.target.open; } }, h('summary', {}, `${feitos.length} feitos – ver`), ...feitos));
+  else { const ordem = new Map(prepItens().map((b, k) => [b.id, k])); sec.append(...[...abertos, ...feitos].sort((x, y) => ordem.get(x.dataset.prep) - ordem.get(y.dataset.prep))); }
   // v1.6.2: acrescentar item à lista, só com o nome – vai no pacote do dia e aparece no painel
   const nome = h('input', { type: 'text', id: 'prepNovoNome', placeholder: 'novo item (ex.: Rampa da doca liberada)', autocomplete: 'off', maxlength: 80 });
   const add = async () => {
     const v = nome.value.trim(); if (!v) { toast('Escreva o nome do item'); nome.focus(); return; }
     if (prepItens().some(b => prepNorm(b.nome) === prepNorm(v))) { toast('Já existe um item com esse nome'); return; }
     const ts = Date.now(), id = `x-${slug(v).toLowerCase().slice(0, 24) || 'item'}-${ts.toString(36)}`;
-    await setPrep({ id, nome: v }, { novo: 1, criado: ts }, 'novo item', v); render(); toast(`Item acrescentado: ${v}`);
+    await setPrep({ id, nome: v }, { novo: 1, criado: ts }, 'novo item', v); redesenha(); toast(`Item acrescentado: ${v}`);
   };
   nome.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
   sec.append(h('div', { class: 'prep-novo', id: 'prepNovo' }, nome, h('button', { type: 'button', id: 'btnPrepNovo', onclick: add }, '+ Adicionar item')));
@@ -2233,6 +2250,8 @@ async function restaurar(file) {
   if (Array.isArray(prep)) await DB.put('meta', Object.fromEntries(prep.filter(p => p && p.id).map(p => [p.id, p])), 'prep');  // backup anterior à v1.6.0 não traz a lista: fica a deste aparelho
   const sns = td('seriais.json');   // v1.9.0: S/N lido na plaqueta; backup anterior à v1.9.0 não traz – fica o deste aparelho
   if (Array.isArray(sns)) await DB.put('meta', Object.fromEntries(sns.filter(r => r && r.tag).map(({ ver, fotos, ...r }) => [r.tag, r])), 'sn');
+  const dj = td('diario.json');   // v1.10.0: Diário de campo; backup anterior à v1.10.0 não traz – fica o deste aparelho
+  if (dj && Array.isArray(dj.registros)) await DB.put('meta', Object.fromEntries(dj.registros.filter(r => r && r.id).map(r => [r.id, r])), 'diario');
   // quem restaura recebe o trabalho: este aparelho passa a ser o ativo
   S.meta.aparelho = { ...S.meta.aparelho, ativo: true, recebido: Date.now(), recebido_de: meta.aparelho || '' }; await DB.put('meta', S.meta.aparelho, 'aparelho'); S._regInativo = false;
   await DB.put('eventos', { ts: Date.now() - 1, tipo: 'sistema', id: null, campo: 'aparelho ativo', valor: `${S.meta.aparelho.nome}${meta.aparelho ? ' (recebeu de ' + meta.aparelho + ')' : ''}`, aparelho_id: S.meta.aparelho.id, exportado: 0 });
@@ -2277,8 +2296,12 @@ export async function montarPacote(completo, sel) {
   const prep = [...prepItens().map(b => ({ ...b, ...(S.meta.prep[b.id] || {}) })), ...Object.values(S.meta.prep).filter(p => !prepItens().some(b => b.id === p.id))].filter(p => p.ts);
   meta.n_prep = prep.length; meta.n_crated = estado.filter(e => e.cr === 'S').length;
   // v1.9.0: S/N lido na plaqueta, por equipamento (sempre a lista inteira: vale o registro mais recente de cada tag)
-  const seriais = Object.values(S.meta.sn || {}).filter(r => r && r.tag && r.ts).map(r => ({ ...r, ver: SN_TXT[snVerif(r.tag)] || '', fotos: [...(S.fotosPlaq.get(r.tag) || [])] }));
+  const seriais = Object.values(S.meta.sn || {}).filter(r => r && r.tag && r.ts).map(r => ({ ...r, ver: snTxt(r.tag), fotos: [...(S.fotosPlaq.get(r.tag) || [])] }));
   meta.n_sn = seriais.filter(r => r.sn).length;
+  // v1.10.0: Diário de campo (sempre a lista inteira: vale o registro mais recente de cada id; pendência aberta atravessa os dias)
+  const fotosDi = (await DB.all('fotos')).filter(f => f.diario && !f.desc).map(f => ({ id: f.id, nome: nomeFoto(f.nome), diario: f.diario }));
+  const diario = Object.values(S.meta.diario || {}).filter(r => r && r.id && r.ts).map(r => (r.k === 'fato' ? { ...r, fotos: fotosDi.filter(f => f.diario === r.id).map(({ id, nome }) => ({ id, nome })) } : r));
+  meta.n_diario = diario.filter(r => !r.apagado).length;
   // v1.6.2: fotos descartadas no aparelho depois de já terem ido em pacote (sempre a lista inteira: repetir não muda nada no escritório)
   const descartadas = (await DB.all('fotos')).filter(f => f.desc).map(f => ({ id: f.id, nome: nomeFoto(f.nome), ts: f.ts, desc_ts: f.desc_ts || 0, desc_por: f.desc_por || '', sala: f.sala_id || f.sala || '', item: f.item || '' }));
   meta.n_fotos_descartadas = descartadas.length;
@@ -2310,6 +2333,7 @@ ${foraL.length ? `<h3>${esc(ESC().rotulo_fora)} (${foraL.length})</h3><ul>${fora
     { name: 'fotos_sala.json', data: JSON.stringify(fotosSala) },
     { name: 'preparacao.json', data: JSON.stringify(prep) },
     { name: 'seriais.json', data: JSON.stringify(seriais) },
+    { name: 'diario.json', data: JSON.stringify({ versao: 1, registros: diario }) },
     { name: 'fotos_descartadas.json', data: JSON.stringify(descartadas) },
     { name: 'fotos.json', data: JSON.stringify(fotos.map(({ blob, ...r }) => r)) },
     { name: 'resumo.html', data: resumo },
@@ -2453,6 +2477,183 @@ async function compartilhar() {
   }
 }
 
+// ---------- v1.10.0 (ciclo 16) – Diário de campo ----------
+// Captura mínima, em campo, do que alimenta o relatório diário de atividades (feito no PC): chegada e saída, clima, fatos do dia, pendências,
+// próximas atividades, pessoas no site e fotos de destaque. Tudo fica em meta "diario" ({ id: registro }), vai inteiro no pacote do dia
+// (diario.json) e no backup, com hora automática e quem registrou. Nada é obrigatório.
+// Regras: o Diário NÃO abre janela de sala, não torna sala inspecionada e não mexe em etapa de volume (o evento é do tipo "diario", que não
+// conta como ação na sala). Editar e apagar: só no dia do registro; cada alteração guarda o que havia antes (hist). A pendência fica aberta
+// de um dia para o outro até ser marcada como resolvida; o cadastro de pessoas se repete e não leva documento nem telefone.
+// Versões anteriores do app ignoram o diario.json e o campo "diario" das fotos; esta versão aceita pacote e backup sem eles.
+const DI_CLIMA = [['sol', '☀ Sol'], ['nublado', '☁ Nublado'], ['chuva', '🌧 Chuva']];
+const DI_FATO = { executado: ['✅', 'Executado'], entrou: ['➡', 'Entrou no site'], saiu: ['⬅', 'Saiu do site'], visita: ['👥', 'Visita'], problema: ['⚠', 'Problema'], seguranca: ['⛑', 'Segurança'] };
+const diReg = () => S.meta.diario || {};
+const diLista = (k, f) => Object.values(diReg()).filter(r => r && r.k === k && !r.apagado && (!f || f(r))).sort((a, b) => (a.hora || a.ts) - (b.hora || b.ts));
+const diHoje = k => diLista(k, r => r.dia === isoDia());
+const diHora = ts => { const d = new Date(ts); return `${p2(d.getHours())}:${p2(d.getMinutes())}`; };
+const diTs = (hhmm, base = Date.now()) => { const m = /^(\d{1,2}):(\d{2})/.exec(hhmm || ''); if (!m) return base; const d = new Date(base); d.setHours(+m[1], +m[2], 0, 0); return d.getTime(); };
+const diId = k => `${k}-${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
+const diBr = iso => (/^\d{4}-\d{2}-\d{2}$/.test(iso || '') ? `${iso.slice(8)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : iso || '');
+const diDoDia = r => r.dia === isoDia();   // editar e apagar: só no dia do registro
+async function setDiario(k, id, patch, campo, valor) {
+  podeRegistrar();
+  const ts = Date.now(), por = S.meta.conferente || '', ant = diReg()[id];
+  const r = { ...(ant || { id, k, dia: isoDia(), ts, por }), ...patch, ts_edit: ts };
+  if (ant) { const { hist, ...antes } = ant; r.hist = [...(hist || []), { ts, por, antes }].slice(-20); }   // o histórico guarda o que havia antes
+  S.meta.diario = { ...diReg(), [id]: r }; await DB.put('meta', S.meta.diario, 'diario');
+  await log('diario', id, campo, valor == null ? '' : String(valor).slice(0, 200), { k });
+  return r;
+}
+const diApagar = (r, rotulo) => setDiario(r.k, r.id, { apagado: 1 }, 'apagado', rotulo || '');
+// foto destaque: estrela numa foto já tirada (sala, item, preparação, plaqueta) – ela pode ir ao relatório diário sem fotografar de novo
+const diDest = id => { const r = diReg()['dest-' + id]; return r && !r.apagado ? r : null; };
+async function alternarDestaque(id) {
+  const f = await DB.get('fotos', id); if (!f || f.desc) return false;
+  const r = diDest(id);
+  if (r && !diDoDia(r)) { toast('Destaque de outro dia: já foi para o relatório daquele dia'); return true; }
+  if (r) { await setDiario('dest', r.id, { apagado: 1 }, 'destaque retirado', id); return false; }
+  await setDiario('dest', 'dest-' + id, { foto: id, nome: nomeFoto(f.nome), dia: isoDia(), apagado: 0, sala: f.sala || '', item: f.item && !String(f.item).startsWith('SALA:') ? f.item : '', tag: f.tag || f.equip || '', tipo: f.prep ? 'prep' : f.plaqueta ? 'plaqueta' : f.reg ? 'sala' : 'item' }, 'foto destaque', id);
+  return true;
+}
+// v1.10.1 – "Apagar" e a estrela ficam LADO A LADO, numa faixa própria no pé da miniatura (cada um com 44 px de altura; a estrela, 44 px de largura).
+// Na v1.10.0 a estrela vinha numa linha a mais, a miniatura crescia e o meio dela passava a cair no botão "Apagar": tocar no meio da foto não abria
+// a foto. A faixa não cobre a imagem; o toque na imagem, no nº da foto e no comentário abre a ficha da foto, como sempre.
+const acoesFoto = (id, depois) => h('div', { class: 'ft-acoes', 'data-acoes': id, onclick: ev => ev.stopPropagation() }, btnApagar(id, depois), btnEstrela(id));
+function btnEstrela(id) {
+  const b = h('button', { type: 'button', class: 'mini estrela' + (diDest(id) ? ' on' : ''), 'data-estrela': id, 'aria-pressed': String(!!diDest(id)), title: 'Foto destaque: pode ir ao relatório diário',
+    onclick: async ev => { ev.stopPropagation(); ev.preventDefault(); const on = await alternarDestaque(id); b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.textContent = on ? '★' : '☆'; toast(on ? `Foto ${id} em destaque no Diário de hoje` : `Foto ${id} sem destaque`); } }, diDest(id) ? '★' : '☆');
+  return b;
+}
+function cartaoDiario() {
+  const pts = diHoje('ponto'), cl = diReg()['clima-' + isoDia()] || {}, nf = diHoje('fato').length, np = diLista('pend', r => !r.resolvida).length, pes = diHoje('pres');
+  const che = pts.find(p => p.tipo === 'cheguei'), sai = [...pts].reverse().find(p => p.tipo === 'sai');
+  const txt = [che ? `cheguei ${diHora(che.hora)}` : 'sem chegada', sai ? `saí ${diHora(sai.hora)}` : null, cl.manha || cl.tarde ? `clima ${[cl.manha, cl.tarde].filter(Boolean).join(' / ')}` : 'sem clima',
+    `${nf} fato${nf === 1 ? '' : 's'}`, `${np} pendência${np === 1 ? '' : 's'} aberta${np === 1 ? '' : 's'}`, `${pes.reduce((a, p) => a + (p.equipe ? +p.n || 1 : 1), 0)} pessoa(s)`, `preparação do site ${prepItens().filter(b => (S.meta.prep[b.id] || {}).feito).length} de ${prepItens().length}`].filter(Boolean).join(' · ');
+  return h('section', { class: 'diario-card', id: 'cardDiario', onclick: abrirDiario },
+    h('div', { class: 'dc-l' }, h('b', {}, '📓 Diário de hoje e Preparação do site'), h('span', { id: 'cardDiarioTxt' }, txt)), h('button', { type: 'button', class: 'primary', id: 'btnAbrirDiario' }, 'Abrir'));
+}
+function abrirDiario() { if (!S.seed) return; modal(telaDiario()); }
+function telaDiario() {
+  // v1.10.2: redesenhar a tela do Diário mantém a rolagem (antes cada toque voltava para o alto da tela)
+  const dia = isoDia(), re = () => { const st = ($('#modal .mbox') || {}).scrollTop || 0; modal(telaDiario()); const bx = $('#modal .mbox'); if (bx) bx.scrollTop = st; };
+  const sec = (id, tit, ...k) => h('section', { class: 'di-sec', id }, h('h3', {}, tit), ...k);
+  const lixo = (r, rot) => h('button', { type: 'button', class: 'mini apagar', 'data-diapagar': r.id, title: 'Apagar (só no dia do registro)', onclick: async () => { if (!confirm(`Apagar "${rot}"?`)) return; await diApagar(r, rot); re(); } }, '🗑');
+  // 1. Cheguei / Saí – aceita mais de um período no dia; a hora é a do toque e pode ser acertada
+  const pts = diHoje('ponto');
+  const ponto = async tipo => { const ts = Date.now(); await setDiario('ponto', diId('ponto'), { tipo, hora: ts }, tipo === 'cheguei' ? 'Cheguei' : 'Saí', diHora(ts)); toast(`${tipo === 'cheguei' ? 'Chegada' : 'Saída'} registrada às ${diHora(ts)}`); re(); };
+  const s1 = sec('diPonto', 'Cheguei / Saí',
+    h('div', { class: 'di-bts' }, h('button', { type: 'button', class: 'big di-che', id: 'btnCheguei', onclick: () => ponto('cheguei') }, '🟢 Cheguei'), h('button', { type: 'button', class: 'big di-sai', id: 'btnSai', onclick: () => ponto('sai') }, '🔴 Saí')),
+    h('div', { class: 'di-lista', id: 'diPontos' }, pts.map(p => h('div', { class: 'di-l', 'data-ponto': p.tipo },
+      h('b', {}, p.tipo === 'cheguei' ? 'Cheguei' : 'Saí'),
+      h('input', { type: 'time', value: diHora(p.hora), 'data-pontohora': p.id, onchange: async ev => { if (!ev.target.value) return; await setDiario('ponto', p.id, { hora: diTs(ev.target.value, p.hora) }, 'hora', ev.target.value); re(); } }), lixo(p, `${p.tipo === 'cheguei' ? 'Cheguei' : 'Saí'} ${diHora(p.hora)}`)))),
+    pts.length ? null : h('p', { class: 'sub' }, 'Um toque registra a hora. Se faltar um dos dois, o escritório usa a 1ª e a última ação do dia e avisa que foi deduzido.'));
+  // 2. Clima – manhã e tarde, um toque cada; "a chuva parou o trabalho?"
+  const cl = diReg()['clima-' + dia] || {};
+  const setClima = async (campo, v) => { await setDiario('clima', 'clima-' + dia, { [campo]: cl[campo] === v ? '' : v }, 'clima ' + campo, cl[campo] === v ? '' : v); re(); };
+  const linhaClima = (campo, rot) => h('div', { class: 'di-l' }, h('b', {}, rot), h('div', { class: 'di-seg' }, DI_CLIMA.map(([v, t]) => h('button', { type: 'button', class: 'chip' + (cl[campo] === v ? ' on' : ''), 'data-clima': `${campo}:${v}`, 'aria-pressed': String(cl[campo] === v), onclick: () => setClima(campo, v) }, t))));
+  const s2 = sec('diClima', 'Clima', linhaClima('manha', 'Manhã'), linhaClima('tarde', 'Tarde'),
+    h('div', { class: 'di-l' }, h('b', {}, 'A chuva parou o trabalho?'), h('div', { class: 'di-seg' }, [['S', 'Sim'], ['N', 'Não']].map(([v, t]) => h('button', { type: 'button', class: 'chip' + (cl.parou === v ? ' on' : ''), 'data-clima': `parou:${v}`, 'aria-pressed': String(cl.parou === v), onclick: () => setClima('parou', v) }, t)))));
+  // 3. Fato do dia
+  const fatos = diHoje('fato');
+  const s3 = sec('diFatos', 'Fato do dia',
+    h('div', { class: 'di-grade' }, Object.entries(DI_FATO).map(([t, [ic, nm]]) => h('button', { type: 'button', class: 'big di-f ' + t, 'data-fato': t, onclick: () => formFato(t) }, `${ic} ${nm}`))),
+    h('div', { class: 'di-lista', id: 'diFatosLista' }, fatos.map(r => { const [ic, nm] = DI_FATO[r.tipo] || ['•', r.tipo];
+      const th = h('span', { class: 'prep-th' }); DB.all('fotos').then(fs => fs.filter(f => f.diario === r.id && !f.desc).forEach(f => { const im = h('img', { alt: f.id }); urlFoto(f.id).then(u => { if (u) im.src = u; }); th.append(h('figure', { 'data-foto': f.id }, im)); }));
+      return h('div', { class: 'di-l di-fato', 'data-fatoid': r.id, 'data-fatotipo': r.tipo },
+        h('div', { class: 'di-txt' }, h('b', {}, `${diHora(r.hora)} · ${ic} ${nm}`), h('span', {}, [r.oque, r.quem, r.txt].filter(Boolean).join(' · ') || '(sem texto)'),
+          r.sala || r.tag ? h('small', {}, [r.sala ? `sala ${r.sala}` : '', r.tag ? `equipamento ${r.tag}` : ''].filter(Boolean).join(' · ')) : null, r.pend ? h('small', { class: 'di-virou' }, 'virou pendência') : null, th),
+        h('div', { class: 'di-ac' },
+          r.tipo === 'problema' && !r.pend ? h('button', { type: 'button', class: 'mini', 'data-virar': r.id, title: 'Criar uma pendência com este texto', onclick: async () => {
+            const pid = diId('pend'); await setDiario('pend', pid, { desc: r.txt || 'Problema', resp: '', prazo: '', resolvida: '', de_fato: r.id }, 'nova pendência', r.txt); await setDiario('fato', r.id, { pend: pid }, 'virou pendência', pid); toast('Pendência aberta'); re(); } }, '→ pendência') : null,
+          h('button', { type: 'button', class: 'mini', 'data-fatoedit': r.id, onclick: () => formFato(r.tipo, r) }, '✎'), lixo(r, `${nm} ${diHora(r.hora)}`))); })));
+  // 4. Pendências – ficam abertas de um dia para o outro
+  const abertas = diLista('pend', r => !r.resolvida), resHoje = diLista('pend', r => r.resolvida === dia);
+  const pd = h('input', { type: 'text', id: 'pendDesc', placeholder: `descrição – ${DITAR}`, maxlength: 300 }), pr = h('input', { type: 'text', id: 'pendResp', placeholder: 'responsável', maxlength: 80 }), pz = h('input', { type: 'date', id: 'pendPrazo' });
+  const addPend = async () => { const d = pd.value.trim(); if (!d) { toast('Escreva a descrição da pendência'); pd.focus(); return; } await setDiario('pend', diId('pend'), { desc: d, resp: pr.value.trim(), prazo: pz.value || '', resolvida: '' }, 'nova pendência', d); re(); };
+  const s4 = sec('diPend', `Pendências (${abertas.length} aberta${abertas.length === 1 ? '' : 's'})`,
+    h('div', { class: 'di-lista', id: 'diPendLista' }, [...abertas, ...resHoje].map(r => h('div', { class: 'di-l di-pend' + (r.resolvida ? ' res' : ''), 'data-pendid': r.id, 'data-pend': r.resolvida ? 'resolvida' : 'aberta' },
+      h('div', { class: 'di-txt' }, h('b', {}, r.desc), h('small', {}, [r.resp ? `responsável: ${r.resp}` : 'sem responsável', r.prazo ? `prazo ${diBr(r.prazo)}` : 'sem prazo', `aberta em ${diBr(r.dia)}`, r.resolvida ? `resolvida em ${diBr(r.resolvida)}` : ''].filter(Boolean).join(' · '))),
+      h('div', { class: 'di-ac' },
+        r.resolvida ? h('button', { type: 'button', class: 'mini', 'data-reabrir': r.id, onclick: async () => { await setDiario('pend', r.id, { resolvida: '', res_ts: 0 }, 'pendência reaberta', r.desc); re(); } }, '↩ reabrir')
+          : h('button', { type: 'button', class: 'mini primary', 'data-resolver': r.id, onclick: async () => { await setDiario('pend', r.id, { resolvida: dia, res_ts: Date.now(), res_por: S.meta.conferente || '' }, 'pendência resolvida', r.desc); toast('Pendência resolvida'); re(); } }, '✔ Resolvida'),
+        diDoDia(r) && !r.resolvida ? lixo(r, r.desc) : null)))),
+    h('div', { class: 'di-form' }, pd, pr, h('label', {}, 'Prazo ', pz), h('button', { type: 'button', id: 'btnPendNova', onclick: addPend }, '+ Pendência')));
+  // 5. Próxima atividade
+  const prox = diLista('prox', r => (r.data || '') >= dia).sort((a, b) => (a.data || '').localeCompare(b.data || ''));
+  const xd = h('input', { type: 'date', id: 'proxData', min: dia }), xt = h('input', { type: 'text', id: 'proxTxt', placeholder: `atividade – ${DITAR}`, maxlength: 400 });
+  const addProx = async () => { const t = xt.value.trim(); if (!xd.value || !t) { toast('Informe a data e a atividade'); return; } await setDiario('prox', diId('prox'), { data: xd.value, txt: t }, 'próxima atividade', `${xd.value} ${t}`); re(); };
+  const s5 = sec('diProx', 'Próximas atividades',
+    h('div', { class: 'di-lista', id: 'diProxLista' }, prox.map(r => h('div', { class: 'di-l', 'data-proxid': r.id }, h('div', { class: 'di-txt' }, h('b', {}, diBr(r.data)), h('span', {}, r.txt)), diDoDia(r) ? lixo(r, r.txt) : null))),
+    h('div', { class: 'di-form' }, h('label', {}, 'Data ', xd), xt, h('button', { type: 'button', id: 'btnProxNova', onclick: addProx }, '+ Atividade')));
+  // 6. Pessoas no site – cadastro que se repete (nome, empresa, função; sem documento, sem telefone); no dia, marca-se quem entrou
+  const pessoas = diLista('pessoa', r => !r.inativa).sort((a, b) => (a.empresa || '').localeCompare(b.empresa || '') || (a.nome || '').localeCompare(b.nome || ''));
+  const pres = id => { const r = diReg()[`pres-${dia}-${id}`]; return r && !r.apagado ? r : null; };
+  const marcar = async p => { const r = pres(p.id);
+    if (r) await setDiario('pres', r.id, { apagado: 1 }, 'saiu da lista do dia', p.nome);
+    else await setDiario('pres', `pres-${dia}-${p.id}`, { pessoa: p.id, nome: p.nome, empresa: p.empresa || '', funcao: p.funcao || '', equipe: p.equipe ? 1 : 0, n: p.equipe ? (+p.n || 1) : 1, apagado: 0, dia }, 'no site', p.nome);
+    re(); };
+  const campoPres = (p, campo, tipo, rot) => { const r = pres(p.id); return h('label', {}, rot + ' ', h('input', { type: tipo, value: r[campo] || '', min: tipo === 'number' ? 1 : null, 'data-pres': `${campo}:${p.id}`, onchange: async ev => { await setDiario('pres', r.id, { [campo]: tipo === 'number' ? Math.max(1, +ev.target.value || 1) : ev.target.value }, campo, ev.target.value); } })); };
+  const nn = h('input', { type: 'text', id: 'pesNome', placeholder: 'nome (ou a equipe, ex.: Eletricistas)', maxlength: 80, autocomplete: 'off' }), ne = h('input', { type: 'text', id: 'pesEmpresa', placeholder: 'empresa', maxlength: 80 }), nf = h('input', { type: 'text', id: 'pesFuncao', placeholder: 'função', maxlength: 80 });
+  const nq = h('input', { type: 'checkbox', id: 'pesEquipe' }), nx = h('input', { type: 'number', id: 'pesN', min: 1, value: 2, style: 'width:70px' });
+  const addPes = async () => { const v = nn.value.trim(); if (!v) { toast('Escreva o nome'); nn.focus(); return; }
+    if (pessoas.some(p => prepNorm(p.nome) === prepNorm(v) && prepNorm(p.empresa) === prepNorm(ne.value))) { toast('Essa pessoa já está no cadastro'); return; }
+    const p = await setDiario('pessoa', diId('pessoa'), { nome: v, empresa: ne.value.trim(), funcao: nf.value.trim(), equipe: nq.checked ? 1 : 0, n: nq.checked ? Math.max(1, +nx.value || 1) : 1 }, 'pessoa nova', v);
+    await setDiario('pres', `pres-${dia}-${p.id}`, { pessoa: p.id, nome: p.nome, empresa: p.empresa, funcao: p.funcao, equipe: p.equipe, n: p.n, apagado: 0, dia }, 'no site', p.nome); re(); };
+  const nPres = pessoas.filter(p => pres(p.id)).reduce((a, p) => a + (p.equipe ? +pres(p.id).n || 1 : 1), 0);
+  const s6 = sec('diPessoas', `Pessoas no site (${nPres} hoje)`,
+    h('div', { class: 'di-lista', id: 'diPesLista' }, pessoas.map(p => { const r = pres(p.id);
+      return h('div', { class: 'di-l di-pes' + (r ? ' on' : ''), 'data-pesid': p.id, 'data-pes': r ? '1' : '0' },
+        h('button', { type: 'button', class: 'prep-bt' + (r ? ' on' : ''), 'data-pesbt': p.id, 'aria-pressed': String(!!r), onclick: () => marcar(p) }, r ? '✔ no site' : '○ não veio'),
+        h('div', { class: 'di-txt' }, h('b', {}, p.nome + (p.equipe ? ' (equipe)' : '')), h('small', {}, [p.empresa, p.funcao].filter(Boolean).join(' · ') || '—')),
+        r ? h('div', { class: 'di-ac' }, p.equipe ? campoPres(p, 'n', 'number', 'pessoas') : null, campoPres(p, 'ent', 'time', 'entrada'), campoPres(p, 'sai', 'time', 'saída')) : h('div', { class: 'di-ac' },
+          h('button', { type: 'button', class: 'mini', 'data-pestirar': p.id, title: 'Tirar do cadastro (não apaga os dias já registrados)', onclick: async () => { if (!confirm(`Tirar "${p.nome}" do cadastro de pessoas?`)) return; await setDiario('pessoa', p.id, { inativa: 1 }, 'saiu do cadastro', p.nome); re(); } }, '✕'))); })),
+    h('div', { class: 'di-form' }, nn, ne, nf, h('label', { class: 'chk' }, nq, ' equipe, sem nomes'), h('label', {}, 'nº ', nx), h('button', { type: 'button', id: 'btnPesNova', onclick: addPes }, '+ Pessoa / equipe')),
+    h('p', { class: 'sub' }, 'Só nome, empresa e função. Documento e telefone não entram aqui.'));
+  // 7. Fotos destaque de hoje
+  const dest = diHoje('dest'), dth = h('span', { class: 'prep-th', id: 'diDestaques' });
+  for (const d of dest) { const im = h('img', { alt: d.foto }); urlFoto(d.foto).then(u => { if (u) im.src = u; }); dth.append(h('figure', { 'data-foto': d.foto }, im, h('figcaption', {}, d.foto), btnEstrela(d.foto))); }
+  const s7 = sec('diDest', `Fotos destaque (${dest.length})`, dth, h('p', { class: 'sub' }, 'Para destacar uma foto já tirada (sala, item, preparação, plaqueta), toque na estrela ☆ ao lado dela. Ela pode ir ao relatório diário sem fotografar de novo.'));
+  return h('div', { class: 'ficha diario', id: 'telaDiario', 'data-dia': dia }, h('h2', {}, `📓 Diário de hoje · ${diBr(dia)}`),
+    h('p', { class: 'sub' }, 'Nada é obrigatório. Cada registro leva a hora e quem registrou, e vai no pacote do dia. Editar e apagar: só hoje.'),
+    s1, s2, s3, secPrep(re), s4, s5, s6, s7, h('div', { class: 'acts' }, h('button', { type: 'button', class: 'primary', id: 'btnDiarioFechar', onclick: fecharModal }, 'Fechar')));
+}
+// fato do dia: tipo + uma frase + até 2 fotos + hora; sala e equipamento são opcionais; "Entrou / Saiu": o quê e quem / empresa
+function formFato(tipo, r) {
+  const novo = !r, id = r ? r.id : diId('fato'), [ic, nm] = DI_FATO[tipo], ent = tipo === 'entrou' || tipo === 'saiu'; let salvo = false;
+  const hora = h('input', { type: 'time', name: 'hora', id: 'fatoHora', value: diHora(r ? r.hora : Date.now()) });
+  const txt = h('textarea', { name: 'txt', id: 'fatoTxt', rows: 3, maxlength: 600, placeholder: `uma frase – ${DITAR}` }, r ? r.txt || '' : '');
+  const oque = h('input', { type: 'text', name: 'oque', id: 'fatoOque', maxlength: 160, placeholder: 'veículo, material, equipamento…', value: r ? r.oque || '' : '' });
+  const quem = h('input', { type: 'text', name: 'quem', id: 'fatoQuem', maxlength: 120, placeholder: 'quem / empresa', value: r ? r.quem || '' : '' });
+  const sala = h('input', { type: 'text', name: 'sala', id: 'fatoSala', list: 'dlSalas', maxlength: 60, placeholder: 'sala (opcional)', autocomplete: 'off', value: r ? r.sala || '' : '' });
+  const tag = h('input', { type: 'text', name: 'tag', id: 'fatoTag', list: 'dlTags', maxlength: 60, placeholder: 'equipamento (opcional)', autocomplete: 'off', value: r ? r.tag || '' : '' });
+  const box = h('span', { class: 'prep-th', id: 'fatoFotos' }), cont = h('span', { id: 'fatoNFotos' }, '');
+  const minhas = async () => (await DB.all('fotos')).filter(f => f.diario === id && !f.desc);
+  const desenha = async () => { const fs = await minhas(); box.innerHTML = ''; cont.textContent = ` ${fs.length} de 2`; inFoto.disabled = fs.length >= 2; lab.classList.toggle('off', fs.length >= 2);
+    for (const f of fs) { const im = h('img', { alt: f.id }); urlFoto(f.id).then(u => { if (u) im.src = u; }); box.append(h('figure', { 'data-foto': f.id }, im, btnApagar(f.id, desenha))); } };
+  const inFoto = h('input', { type: 'file', accept: 'image/*', capture: 'environment', hidden: true, id: 'inFotoFato', onchange: async ev => {
+    const fl = [...ev.target.files]; ev.target.value = ''; const ja = (await minhas()).length;
+    for (const f1 of fl.slice(0, Math.max(0, 2 - ja))) await addFoto(f1, null, 'DIARIO', { diario: id });
+    if (fl.length > 2 - ja) toast('Cada fato leva até 2 fotos'); desenha(); } });
+  const lab = h('label', { class: 'btn', id: 'btnFotoFato' }, '📷 Foto', inFoto);
+  const form = h('form', { class: 'ficha', id: 'formFato', 'data-fato': tipo, onsubmit: async ev => {
+    ev.preventDefault();
+    const v = { tipo, hora: diTs(hora.value, r ? r.hora : Date.now()), txt: txt.value.trim(), oque: ent ? oque.value.trim() : '', quem: ent ? quem.value.trim() : '', sala: sala.value.trim(), tag: tag.value.trim() };
+    if (!v.txt && !v.oque && !(await minhas()).length) { toast('Escreva uma frase ou tire uma foto'); return; }
+    await setDiario('fato', id, v, novo ? `fato: ${nm}` : `fato editado: ${nm}`, v.txt || v.oque); salvo = true; toast(`${nm} registrado às ${diHora(v.hora)}`); modal(telaDiario());
+  } }, h('h2', {}, `${ic} ${nm}`),
+    h('div', { class: 'grid' }, h('label', {}, 'Hora', hora),
+      ent ? h('label', {}, 'O quê', oque) : null, ent ? h('label', {}, 'Quem / empresa', quem) : null,
+      h('label', { class: 'full' }, ent ? 'Finalidade / observação' : 'O que aconteceu', txt),
+      h('label', {}, 'Sala (opcional)', sala), h('label', {}, 'Equipamento (opcional)', tag)),
+    h('datalist', { id: 'dlSalas' }, todasSalas().filter(s => s.tipo !== 'bloco' && s.tipo !== 'marca' && s.codigo && s.codigo !== '?').slice(0, 400).map(s => h('option', { value: s.codigo }, s.nome || ''))),
+    h('datalist', { id: 'dlTags' }, ((S.seed && S.seed.equips) || []).map(e => h('option', { value: e.tag }, e.nome || ''))),
+    h('div', { class: 'fotos' }, h('b', {}, 'Fotos (até 2)'), cont, box, lab),
+    h('div', { class: 'acts' }, h('button', { type: 'button', id: 'btnFatoCancelar', onclick: async () => {
+      if (novo) for (const f of await minhas()) await apagarFoto(f.id);   // fato novo cancelado: as fotos tiradas para ele não ficam soltas
+      salvo = true; modal(telaDiario()); } }, 'Cancelar'), h('button', { type: 'submit', class: 'primary', id: 'btnFatoSalvar' }, 'Salvar')));
+  modal(form); desenha();
+}
+
 // ---------- inicialização ----------
 function telaSemDados() {
   const main = $('#main'); main.innerHTML = '';
@@ -2502,7 +2703,7 @@ function pedirConferente(motivo) {
 }
 // atalho para os testes: abre a edição de forma de uma sala (o mesmo que ficha da sala → "Editar forma")
 function editarForma(id) { const s = salasDe(S.planta).find(x => x.id === id); if (!s) return false; S.edit = true; S.draw = null; S.edModo = 'vertices'; S.edTmp = { sala: s, poly: s.poly.map(p => [...p]) }; render(); return true; }
-window.__APP__ = { setSN, snVerif, snNorm, telaSN, SN_TXT, toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
+window.__APP__ = { conferirTodos, setDiario, diLista, abrirDiario, alternarDestaque, snTxt, setSN, snVerif, snNorm, telaSN, SN_TXT, toggleEtapa, marcarFora, apagarFoto, apagarComConfirmacao, loteFora, volumesKanban, kbModelo, kbPos, horasEtapas, S, NAV, est, proxima, montarPacote, DB, salasDe, distSeg, pxPorMetro, editarForma, abrirSala, salaPorId, abrirEquip, ondeEsta, encerrarVistoria, tique, nomeArq, nomeFoto, importarSeed,
   oficialDe, mostrarQR, entrouSala, diferenca, etAtual, crPend, setCrated, crateTodos, entregarAparelho, restaurar, inativo, prepItens, ficha, fecharDia, enviarPacote, anexarRecebidas, telaRecebidas, dataExif, estadoBateria, prepFotos, unificarPrep, gerarDeNovo, telaAbertura, telaCalibrar, fotosDaSala, addFotoSala, editarFoto, compartilhar, lembretes, isoLocal, qrSvg };
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => { });
 iniciar();
